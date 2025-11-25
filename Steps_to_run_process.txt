@@ -1,0 +1,12 @@
+run manually
+# Monitor system health
+python monitor_automation.py
+
+# Check database and data status  
+python check_data_status_console_safe.py
+
+# Run complete daily workflow (with minor Unicode display issues)
+python daily_automation.py --check-only
+
+or use windows schedular
+C:\Users\sreea\OneDrive\Desktop\sqlserver_copilot\run_daily_automation.bat

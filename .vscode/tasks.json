@@ -1,0 +1,83 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Install Dependencies",
+            "type": "shell",
+            "command": "pip install -r requirements.txt",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Start Jupyter Lab",
+            "type": "shell",
+            "command": "jupyter lab --notebook-dir=notebooks",
+            "group": "build",
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
+            "label": "Start Jupyter Notebook",
+            "type": "shell",
+            "command": "jupyter notebook --notebook-dir=notebooks",
+            "group": "build",
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
+            "label": "Test Database Connection",
+            "type": "shell",
+            "command": "python -c \"from src.database.connection import SQLServerConnection; conn = SQLServerConnection(); print('Testing connection...'); conn.test_connection()\"",
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Data Quality Check",
+            "type": "shell",
+            "command": "python -c \"import pandas as pd; from pandas_profiling import ProfileReport; print('Data quality tools ready for use')\"",
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "Format Code with Black",
+            "type": "shell",
+            "command": "black src/ --line-length 88",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Lint with Flake8",
+            "type": "shell",
+            "command": "flake8 src/ --max-line-length 88 --extend-ignore E203,W503",
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "Run All Notebooks",
+            "type": "shell",
+            "command": "jupyter nbconvert --execute notebooks/*.ipynb --to html --output-dir=reports/",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Clean Python Cache",
+            "type": "shell",
+            "command": "find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || find . -name \"*.pyc\" -delete",
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Setup Environment",
+            "type": "shell",
+            "command": "python -m venv venv && venv\\Scripts\\activate && pip install -r requirements.txt",
+            "group": "build",
+            "problemMatcher": [],
+            "windows": {
+                "command": "python -m venv venv && .\\venv\\Scripts\\activate && pip install -r requirements.txt"
+            },
+            "linux": {
+                "command": "python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+            }
+        }
+    ]
+}
