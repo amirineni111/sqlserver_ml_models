@@ -37,7 +37,7 @@ class ResultsExporter:
                           export_format='standard', filter_type='all'):
         """Export predictions to CSV with various options"""
         
-        print("🔄 Generating predictions for export...")
+        print("[PROCESSING] Generating predictions for export...")
         
         # Get predictions
         results = self.predictor.predict_signals(
@@ -47,14 +47,14 @@ class ResultsExporter:
         )
         
         if results is None or results.empty:
-            print("❌ No predictions available for export")
+            print("[ERROR] No predictions available for export")
             return None
         
         # Apply filters
         filtered_results = self._apply_filters(results, filter_type)
         
         if filtered_results.empty:
-            print(f"❌ No predictions match the filter: {filter_type}")
+            print(f"[ERROR] No predictions match the filter: {filter_type}")
             return None
         
         # Format based on export format
@@ -74,8 +74,8 @@ class ResultsExporter:
         # Export to CSV
         export_df.to_csv(filepath, index=False)
         
-        print(f"✅ Results exported to: {filepath}")
-        print(f"📊 Exported {len(export_df)} predictions")
+        print(f"[SUCCESS] Results exported to: {filepath}")
+        print(f"[DATA] Exported {len(export_df)} predictions")
         
         # Print summary
         self._print_export_summary(export_df, filter_type)
@@ -214,13 +214,13 @@ class ResultsExporter:
     
     def export_batch_with_segments(self, confidence_threshold=0.7):
         """Export batch results segmented by confidence levels"""
-        print("🔄 Generating segmented batch export...")
+        print("[PROCESSING] Generating segmented batch export...")
         
         # Get all predictions
         results = self.predictor.predict_signals(confidence_threshold=0.5)  # Lower threshold to get all
         
         if results is None or results.empty:
-            print("❌ No predictions available")
+            print("[ERROR] No predictions available")
             return
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -232,7 +232,7 @@ class ResultsExporter:
             filepath = self.results_dir / filename
             enhanced_high = self._create_enhanced_format(high_conf)
             enhanced_high.to_csv(filepath, index=False)
-            print(f"✅ High confidence signals exported: {filepath} ({len(high_conf)} signals)")
+            print(f"[SUCCESS] High confidence signals exported: {filepath} ({len(high_conf)} signals)")
         
         # Export medium confidence
         medium_conf = results[(results['confidence'] > 0.6) & (results['confidence'] <= 0.7)]
@@ -241,7 +241,7 @@ class ResultsExporter:
             filepath = self.results_dir / filename
             enhanced_medium = self._create_enhanced_format(medium_conf)
             enhanced_medium.to_csv(filepath, index=False)
-            print(f"✅ Medium confidence signals exported: {filepath} ({len(medium_conf)} signals)")
+            print(f"[SUCCESS] Medium confidence signals exported: {filepath} ({len(medium_conf)} signals)")
         
         # Export trading summary
         trading_signals = results[results['confidence'] > confidence_threshold]
@@ -250,7 +250,7 @@ class ResultsExporter:
             filepath = self.results_dir / filename
             trading_format = self._create_trading_format(trading_signals)
             trading_format.to_csv(filepath, index=False)
-            print(f"✅ Trading signals summary exported: {filepath} ({len(trading_signals)} signals)")
+            print(f"[SUCCESS] Trading signals summary exported: {filepath} ({len(trading_signals)} signals)")
 
 def main():
     """Main CLI interface for CSV export utility"""
@@ -270,7 +270,7 @@ def main():
     args = parser.parse_args()
     
     if not args.export_csv and not args.segmented:
-        print("❌ Please specify --export-csv or --segmented to export results")
+        print("[ERROR] Please specify --export-csv or --segmented to export results")
         return 1
     
     # Initialize exporter
@@ -294,11 +294,11 @@ def main():
                 filter_type=args.filter
             )
         
-        print(f"\n📁 All exports saved to: {args.results_dir}/")
+        print(f"\n[FILES] All exports saved to: {args.results_dir}/")
         return 0
         
     except Exception as e:
-        print(f"❌ Export failed: {e}")
+        print(f"[ERROR] Export failed: {e}")
         return 1
 
 if __name__ == "__main__":

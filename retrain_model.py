@@ -88,14 +88,15 @@ class ModelRetrainer:
     
     def load_latest_data(self, days_back=None):
         """Load the latest data from SQL Server"""
-        print("📊 Loading latest data from SQL Server...")
+        print("[DATA] Loading latest data from SQL Server...")
         
         # Determine date range
         if days_back:
             date_filter = f"WHERE h.trading_date >= DATEADD(day, -{days_back}, CAST(GETDATE() AS DATE))"
         else:
-            # Load all available data for full retrain
-            date_filter = "WHERE h.trading_date >= '2024-01-01'"
+            # Load balanced training data - exclude recent heavily biased period (Nov 2025)
+            # Nov 2025: 64.5% Buy vs 35.5% Sell - too skewed for good training
+            date_filter = "WHERE h.trading_date >= '2024-01-01' AND h.trading_date <= '2025-10-31'"
         
         query = f"""
         SELECT 
@@ -118,7 +119,7 @@ class ModelRetrainer:
         
         try:
             df = self.db.execute_query(query)
-            print(f"✅ Data loaded: {df.shape[0]:,} records from {df['trading_date'].min()} to {df['trading_date'].max()}")
+            print(f"[SUCCESS] Data loaded: {df.shape[0]:,} records from {df['trading_date'].min()} to {df['trading_date'].max()}")
             
             # Check for new data
             if df.empty:
@@ -127,7 +128,7 @@ class ModelRetrainer:
             return df
             
         except Exception as e:
-            print(f"❌ Error loading data: {e}")
+            print(f"[ERROR] Error loading data: {e}")
             raise
     
     def compare_with_previous_data(self, new_df):
@@ -148,7 +149,7 @@ class ModelRetrainer:
                 print("⚠️  Warning: No new data found. Consider checking data sources.")
             
         except FileNotFoundError:
-            print("📊 No previous data found - performing fresh analysis")
+            print("[DATA] No previous data found - performing fresh analysis")
     
     def perform_eda(self, df):
         """Perform exploratory data analysis"""
@@ -179,7 +180,7 @@ class ModelRetrainer:
         if missing_data:
             print(f"  Missing values detected: {missing_data}")
         else:
-            print("  ✅ No missing values detected")
+            print("  [SUCCESS] No missing values detected")
         
         # Save exploration results
         exploration_results = {
@@ -198,7 +199,7 @@ class ModelRetrainer:
         with open('data/exploration_results.pkl', 'wb') as f:
             pickle.dump(exploration_results, f)
         
-        print("✅ EDA complete and results saved")
+        print("[SUCCESS] EDA complete and results saved")
         return exploration_results
     
     def engineer_features(self, df):
@@ -236,7 +237,7 @@ class ModelRetrainer:
         # Handle NaN values
         df_features = df_features.fillna(method='bfill').fillna(0)
         
-        print(f"✅ Feature engineering complete: {df_features.shape[1]} total features")
+        print(f"[SUCCESS] Feature engineering complete: {df_features.shape[1]} total features")
         return df_features
     
     def add_enhanced_features(self, df):
@@ -337,7 +338,7 @@ class ModelRetrainer:
         target_encoder = LabelEncoder()
         y_encoded = target_encoder.fit_transform(y)
         
-        print(f"✅ ML dataset prepared:")
+        print(f"[SUCCESS] ML dataset prepared:")
         print(f"  Features: {X.shape}")
         print(f"  Target classes: {list(target_encoder.classes_)}")
         print(f"  Valid samples: {len(X):,}")
@@ -365,20 +366,24 @@ class ModelRetrainer:
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Define models
+        # Initialize models with better class balancing and calibration
         models = {
             'Random Forest': RandomForestClassifier(
                 n_estimators=100, max_depth=10, min_samples_split=5,
-                class_weight='balanced', random_state=42, n_jobs=-1
+                class_weight='balanced_subsample',  # More aggressive balancing per tree
+                random_state=42, n_jobs=-1
             ),
             'Gradient Boosting': GradientBoostingClassifier(
                 n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42
             ),
             'Logistic Regression': LogisticRegression(
-                class_weight='balanced', random_state=42, max_iter=1000
+                class_weight='balanced', random_state=42, max_iter=1000,
+                C=0.1,  # Stronger regularization to prevent overfitting
+                solver='liblinear'  # Better for small datasets
             ),
             'Extra Trees': ExtraTreesClassifier(
-                n_estimators=100, max_depth=10, class_weight='balanced',
+                n_estimators=100, max_depth=10, 
+                class_weight='balanced_subsample',  # More aggressive balancing
                 random_state=42, n_jobs=-1
             )
         }
@@ -475,7 +480,7 @@ class ModelRetrainer:
         with open('data/model_results.pkl', 'wb') as f:
             pickle.dump(results_to_save, f)
         
-        print("✅ Model artifacts saved successfully:")
+        print("[SUCCESS] Model artifacts saved successfully:")
         print(f"  Model: {model_path}")
         print(f"  Scaler: data/scaler.joblib")
         print(f"  Encoder: data/target_encoder.joblib")
@@ -501,16 +506,16 @@ class ModelRetrainer:
                 
                 improvement = new_f1 - old_f1
                 if improvement > 0:
-                    print(f"  🚀 Improvement: +{improvement:.3f} ({improvement/old_f1*100:.1f}%)")
+                    print(f"  [IMPROVEMENT] Improvement: +{improvement:.3f} ({improvement/old_f1*100:.1f}%)")
                 else:
                     print(f"  📉 Decline: {improvement:.3f} ({improvement/old_f1*100:.1f}%)")
             
         except (FileNotFoundError, KeyError):
-            print("📊 No previous model found for comparison")
+            print("[DATA] No previous model found for comparison")
     
     def run_full_retrain(self):
         """Execute complete retraining process"""
-        print(f"🚀 Starting model retraining - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[START] Starting model retraining - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"   Mode: {'Quick' if self.quick_mode else 'Full'}")
         print(f"   Backup: {'Yes' if self.backup_old else 'No'}")
         print("=" * 80)
@@ -545,15 +550,15 @@ class ModelRetrainer:
             self.compare_model_performance(training_results)
             
             print("=" * 80)
-            print("✅ RETRAINING COMPLETE!")
+            print("[SUCCESS] RETRAINING COMPLETE!")
             print(f"🏆 Best Model: {training_results['best_model_name']}")
-            print(f"📊 F1-Score: {training_results['model_results'][training_results['best_model_name']]['f1_score']:.3f}")
+            print(f"[DATA] F1-Score: {training_results['model_results'][training_results['best_model_name']]['f1_score']:.3f}")
             print(f"📅 Timestamp: {self.timestamp}")
             
             return True
             
         except Exception as e:
-            print(f"❌ Retraining failed: {e}")
+            print(f"[ERROR] Retraining failed: {e}")
             print("Check logs and data availability")
             return False
 
@@ -577,7 +582,7 @@ def main():
         print("2. Review performance: Check reports/ folder")
         print("3. Deploy if satisfied with results")
     else:
-        print("\n❌ Retraining failed. Please check the logs and try again.")
+        print("\n[ERROR] Retraining failed. Please check the logs and try again.")
         sys.exit(1)
 
 if __name__ == "__main__":

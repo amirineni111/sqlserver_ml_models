@@ -58,8 +58,8 @@ class TradingSignalPredictor:
     def __init__(self, model_path=None, scaler_path=None, encoder_path=None):
         """Initialize the predictor with saved model artifacts"""
         
-        # Default paths (updated for enhanced features model)
-        self.model_path = model_path or 'data/best_model_logistic_regression.joblib'
+        # Default paths (updated for rebalanced model)
+        self.model_path = model_path or 'data/best_model_extra_trees.joblib'
         self.scaler_path = scaler_path or 'data/scaler.joblib'
         self.encoder_path = encoder_path or 'data/target_encoder.joblib'
         
