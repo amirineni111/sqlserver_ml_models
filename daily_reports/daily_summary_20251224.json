@@ -1,0 +1,28 @@
+{
+  "date": "2025-12-24T08:03:10.496750",
+  "log_file": "logs\\daily_automation_20251224_080134.log",
+  "data_status": {
+    "connected": true,
+    "age_days": 1,
+    "latest_date": "2025-12-23",
+    "total_records": 43779
+  },
+  "retraining": {
+    "performed": true,
+    "success": false,
+    "duration_minutes": 0.3341933833333333,
+    "reason": "Data is fresh (1 days old)"
+  },
+  "csv_exports": {
+    "success": true,
+    "files_created": [
+      "all_signals_technical_analysis_20251224_080251.csv",
+      "batch_predictions_20251224_080236.csv",
+      "high_confidence_signals_20251224_080242.csv",
+      "high_confidence_technical_20251224_080251.csv",
+      "medium_confidence_signals_20251224_080242.csv",
+      "medium_confidence_technical_20251224_080251.csv",
+      "trading_signals_summary_20251224_080242.csv"
+    ]
+  }
+}
