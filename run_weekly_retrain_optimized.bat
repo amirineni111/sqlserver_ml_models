@@ -31,9 +31,9 @@ echo.
 REM Create backup directory if it doesn't exist
 if not exist "data\backups" mkdir "data\backups"
 
-REM Run the optimized weekly model retraining
-echo [INFO] Running optimized weekly model retraining...
-%PYTHON_EXE% weekly_retrain_optimized.py
+REM Run the ULTRA-FAST weekly model retraining (uses vectorized operations)
+echo [INFO] Running ULTRA-FAST weekly model retraining...
+%PYTHON_EXE% weekly_retrain_ultra_fast.py
 
 REM Check if retraining was successful
 if errorlevel 1 (
