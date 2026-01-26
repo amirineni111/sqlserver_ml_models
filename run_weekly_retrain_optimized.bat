@@ -20,8 +20,6 @@ REM Check if Python is available
 if errorlevel 1 (
     echo ERROR: Python is not available or not in PATH
     echo Please install Python or add it to your PATH
-    echo Press any key to exit...
-    pause >nul
     exit /b 1
 )
 
@@ -41,8 +39,6 @@ if errorlevel 1 (
     echo [ERROR] Weekly model retraining failed!
     echo Check the output above for details.
     echo.
-    echo Press any key to exit...
-    pause >nul
     exit /b 1
 )
 
@@ -68,6 +64,3 @@ echo Completion Time: %date% %time%
 echo Model backups saved to: data\backups\
 echo ========================================
 echo.
-
-echo Press any key to exit...
-pause >nul

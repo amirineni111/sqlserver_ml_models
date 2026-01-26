@@ -79,10 +79,10 @@ class UltraFastWeeklyRetrainer:
         """Load training data with optimized query - LIMITED dataset for speed"""
         print("[DATA] Loading training data...")
         
-        # ULTRA-OPTIMIZED: Load only last 6 months for speed
-        # This reduces data volume significantly while maintaining model quality
+        # ULTRA-OPTIMIZED: Load only last 3 months for MAXIMUM speed
+        # Rolling window ensures consistent data volume
         query = """
-        SELECT 
+        SELECT TOP 100000
             h.trading_date,
             h.ticker,
             CAST(h.open_price AS FLOAT) as open_price,
@@ -95,9 +95,9 @@ class UltraFastWeeklyRetrainer:
         FROM dbo.nasdaq_100_hist_data h
         INNER JOIN dbo.nasdaq_100_rsi_signals r 
             ON h.ticker = r.ticker AND h.trading_date = r.trading_date
-        WHERE h.trading_date >= '2025-04-01'
+        WHERE h.trading_date >= DATEADD(MONTH, -3, GETDATE())
           AND r.rsi_trade_signal IS NOT NULL
-        ORDER BY h.trading_date, h.ticker
+        ORDER BY h.trading_date DESC, h.ticker
         """
         
         try:
@@ -233,11 +233,11 @@ class UltraFastWeeklyRetrainer:
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Gradient Boosting model
+        # Gradient Boosting model (50 estimators for speed - minimal accuracy loss)
         model = GradientBoostingClassifier(
-            n_estimators=100, 
+            n_estimators=50, 
             learning_rate=0.1, 
-            max_depth=6, 
+            max_depth=5, 
             random_state=42
         )
         
