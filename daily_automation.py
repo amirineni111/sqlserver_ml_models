@@ -179,7 +179,10 @@ def run_model_retraining():
             return True, training_time
         else:
             logging.error(f"❌ Model retraining failed after {training_time:.1f} minutes")
-            logging.error(f"Error output: {result.stderr}")
+            if result.stdout:
+                logging.error(f"Standard output: {result.stdout}")
+            if result.stderr:
+                logging.error(f"Error output: {result.stderr}")
             return False, training_time
             
     except subprocess.TimeoutExpired:
@@ -189,78 +192,54 @@ def run_model_retraining():
         logging.error(f"❌ Error during model retraining: {str(e)}")
         return False, 0.0
 
-def generate_csv_exports():
+def export_to_database():
     """
-    Generate all CSV exports for trading decisions.
-    Returns: (success, csv_files_created)
+    Export predictions directly to database table.
+    Returns: (success, record_count)
     """
     try:
-        logging.info("📊 Generating CSV exports for trading decisions...")
-        
-        # Ensure results directory exists
-        results_dir = Path("results")
-        results_dir.mkdir(exist_ok=True)
-        
-        # Generate predictions with CSV export
-        result = subprocess.run([
-            sys.executable, "predict_trading_signals.py", 
-            "--batch", "--export-csv", f"--results-dir={results_dir}"
-        ], capture_output=True, text=True, timeout=300)  # 5 minute timeout
-        
-        if result.returncode != 0:
-            logging.error(f"❌ CSV generation failed: {result.stderr}")
-            return False, []
-        
-        # Run advanced export utility
-        export_result = subprocess.run([
-            sys.executable, "export_results.py", "--segmented"
-        ], capture_output=True, text=True, timeout=120)  # 2 minute timeout
-        
-        # Also run technical indicators export
-        tech_export_result = subprocess.run([
-            sys.executable, "export_results.py", "--technical-segmented"
-        ], capture_output=True, text=True, timeout=180)  # 3 minute timeout
+        logging.info("📊 Exporting predictions to database...")
         
         # Export to database
         db_export_result = subprocess.run([
             sys.executable, "export_to_database.py", "--batch"
-        ], capture_output=True, text=True, timeout=180)  # 3 minute timeout
+        ], capture_output=True, text=True, timeout=300)  # 5 minute timeout
         
-        # Count generated CSV files
-        csv_files = list(results_dir.glob("*.csv"))
-        csv_files = [f.name for f in csv_files if f.stat().st_mtime > (datetime.now().timestamp() - 3600)]  # Files from last hour
+        if db_export_result.returncode != 0:
+            if db_export_result.stdout:
+                logging.error(f"❌ Database export failed - stdout: {db_export_result.stdout}")
+            if db_export_result.stderr:
+                logging.error(f"❌ Database export failed - stderr: {db_export_result.stderr}")
+            return False, 0
         
-        # Check results
-        csv_success = export_result.returncode == 0
-        tech_success = tech_export_result.returncode == 0
-        db_success = db_export_result.returncode == 0
+        # Parse output to get record count
+        record_count = 0
+        output_lines = db_export_result.stdout.strip().split('\n')
+        for line in output_lines:
+            if "records inserted" in line.lower() or "rows inserted" in line.lower():
+                try:
+                    # Extract number from line
+                    import re
+                    numbers = re.findall(r'\d+', line)
+                    if numbers:
+                        record_count = int(numbers[0])
+                except:
+                    pass
         
-        if csv_success and tech_success and db_success:
-            logging.info(f"✅ CSV exports completed successfully")
-            logging.info(f"✅ Database export completed successfully")
-            logging.info(f"📁 Generated files: {', '.join(csv_files)}")
-            return True, csv_files
-        elif csv_success and db_success:
-            logging.warning(f"⚠️ CSV and DB export succeeded, but technical CSV had issues: {tech_export_result.stderr}")
-            return True, csv_files
-        elif csv_success:
-            if not db_success:
-                logging.warning(f"⚠️ CSV export succeeded, but database export failed: {db_export_result.stderr}")
-            if not tech_success:
-                logging.warning(f"⚠️ CSV export succeeded, but technical export had issues: {tech_export_result.stderr}")
-            return True, csv_files
-        else:
-            logging.warning(f"⚠️ Basic CSV export succeeded, but advanced export had issues: {export_result.stderr}")
-            return True, csv_files
+        logging.info(f"✅ Database export completed successfully")
+        if record_count > 0:
+            logging.info(f"📈 Inserted {record_count:,} records to database")
+        
+        return True, record_count
             
     except subprocess.TimeoutExpired:
-        logging.error("⏰ CSV generation timed out")
-        return False, []
+        logging.error("⏰ Database export timed out")
+        return False, 0
     except Exception as e:
-        logging.error(f"❌ Error generating CSV exports: {str(e)}")
-        return False, []
+        logging.error(f"❌ Error exporting to database: {str(e)}")
+        return False, 0
 
-def create_daily_summary(log_filename, data_status, retrain_info, csv_info):
+def create_daily_summary(log_filename, data_status, retrain_info, db_info):
     """Create a daily summary report."""
     summary_dir = Path("daily_reports")
     summary_dir.mkdir(exist_ok=True)
@@ -282,9 +261,9 @@ def create_daily_summary(log_filename, data_status, retrain_info, csv_info):
             "duration_minutes": retrain_info[2] if retrain_info and len(retrain_info) > 2 else None,
             "reason": retrain_info[3] if retrain_info and len(retrain_info) > 3 else None
         },
-        "csv_exports": {
-            "success": csv_info[0] if csv_info else False,
-            "files_created": csv_info[1] if csv_info and len(csv_info) > 1 else []
+        "database_export": {
+            "success": db_info[0] if db_info else False,
+            "records_inserted": db_info[1] if db_info and len(db_info) > 1 else 0
         }
     }
     
@@ -298,10 +277,10 @@ def main():
     parser = argparse.ArgumentParser(description="Daily automation for SQL Server ML Trading Signals")
     parser.add_argument("--force-retrain", action="store_true", 
                        help="Force model retraining regardless of data age")
-    parser.add_argument("--csv-only", action="store_true",
-                       help="Only generate CSV exports (skip retraining check)")
+    parser.add_argument("--export-only", action="store_true",
+                       help="Only export to database (skip retraining)")
     parser.add_argument("--check-only", action="store_true",
-                       help="Only check data status (no retraining or CSV)")
+                       help="Only check data status (no retraining or export)")
     
     args = parser.parse_args()
     
@@ -314,7 +293,7 @@ def main():
     # Track results
     data_status = None
     retrain_info = None
-    csv_info = None
+    db_info = None
     
     try:
         # Step 1: Check data status
@@ -331,11 +310,11 @@ def main():
         
         if args.check_only:
             logging.info("🏁 Check-only mode completed")
-            create_daily_summary(log_filename, data_status, retrain_info, csv_info)
+            create_daily_summary(log_filename, data_status, retrain_info, db_info)
             return 0
         
         # Step 2: Model retraining decision
-        if not args.csv_only:
+        if not args.export_only:
             logging.info("=" * 60)
             logging.info("STEP 2: MODEL RETRAINING DECISION")
             logging.info("=" * 60)
@@ -352,21 +331,21 @@ def main():
                 retrain_info = (True, retrain_success, training_time, reason)
                 
                 if not retrain_success:
-                    logging.error("❌ Model retraining failed. Continuing with CSV generation using existing model.")
+                    logging.error("❌ Model retraining failed. Continuing with database export using existing model.")
             else:
                 logging.info("⏭️ Skipping model retraining")
                 retrain_info = (False, None, None, reason)
         
-        # Step 3/4: CSV Generation
+        # Step 3/4: Database Export
         logging.info("=" * 60)
-        logging.info("STEP 4: CSV EXPORT GENERATION" if not args.csv_only else "CSV EXPORT GENERATION")
+        logging.info("STEP 4: DATABASE EXPORT" if not args.export_only else "DATABASE EXPORT")
         logging.info("=" * 60)
         
-        csv_success, csv_files = generate_csv_exports()
-        csv_info = (csv_success, csv_files)
+        db_success, record_count = export_to_database()
+        db_info = (db_success, record_count)
         
-        if not csv_success:
-            logging.error("❌ CSV generation failed")
+        if not db_success:
+            logging.error("❌ Database export failed")
         
         # Final summary
         logging.info("=" * 60)
@@ -386,16 +365,16 @@ def main():
             else:
                 logging.info("⏭️ Retraining: Skipped")
         
-        if csv_info:
-            status = "✅ Success" if csv_info[0] else "❌ Failed"
-            file_count = len(csv_info[1]) if csv_info[1] else 0
-            logging.info(f"📁 CSV Exports: {status} ({file_count} files)")
+        if db_info:
+            status = "✅ Success" if db_info[0] else "❌ Failed"
+            record_count = db_info[1] if db_info[1] else 0
+            logging.info(f"[DATABASE] Database Export: {status} ({record_count:,} records)")
         
         # Create summary report
-        summary_file = create_daily_summary(log_filename, data_status, retrain_info, csv_info)
+        summary_file = create_daily_summary(log_filename, data_status, retrain_info, db_info)
         
         # Determine exit code
-        if is_connected and (csv_info is None or csv_info[0]):
+        if is_connected and (db_info is None or db_info[0]):
             logging.info("🎉 Daily automation completed successfully!")
             return 0
         else:
