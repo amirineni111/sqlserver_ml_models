@@ -65,7 +65,9 @@ def safe_print(text):
             '📅': '[DATE]',
             '📉': '[DECLINE]',
             '⚙️': '[CONFIG]',
-            '⚙': '[CONFIG]'
+            '⚙': '[CONFIG]',
+            '🧮': '[CALC]',
+            '🤖': '[ML]'
         }
         for emoji, replacement in emoji_replacements.items():
             text = text.replace(emoji, replacement)
@@ -341,7 +343,7 @@ class ModelRetrainer:
     
     def prepare_ml_dataset(self, df_features):
         """Prepare dataset for machine learning"""
-        print("🧮 Preparing ML dataset...")
+        safe_print("🧮 Preparing ML dataset...")
         
         target_column = 'rsi_trade_signal'
         exclude_cols = ['trading_date', 'ticker', 'company', target_column]
@@ -380,7 +382,7 @@ class ModelRetrainer:
     
     def train_models(self, X, y, feature_cols):
         """Train and compare ML models"""
-        print("🤖 Training machine learning models...")
+        safe_print("🤖 Training machine learning models...")
         
         # Time-aware split
         df_temp = pd.DataFrame({'y': y}, index=X.index)
