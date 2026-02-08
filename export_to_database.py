@@ -276,7 +276,7 @@ class DatabaseExporter:
         try:
             # Get technical indicators
             tickers = base_results['ticker'].unique().tolist()
-            recent_data = self.predictor.get_latest_data(days_back=10)
+            recent_data = self.predictor.get_latest_data(days_back=80)
             
             if tickers:
                 recent_data = recent_data[recent_data['ticker'].isin(tickers)]

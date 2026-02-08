@@ -24,6 +24,7 @@ from pathlib import Path
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.utils.class_weight import compute_sample_weight
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
@@ -135,6 +136,10 @@ class UltraFastWeeklyRetrainer:
             0.5
         )
         
+        # Gap (normalized as percentage)
+        gap_raw = df.groupby('ticker')['open_price'].transform(lambda x: x.diff()) - df.groupby('ticker')['close_price'].transform(lambda x: x.shift(1))
+        df['gap_pct'] = np.where(df['close_price'] > 0, gap_raw / df['close_price'] * 100, 0)
+        
         # RSI features (vectorized)
         df['rsi_oversold'] = (df['RSI'] < 30).astype(int)
         df['rsi_overbought'] = (df['RSI'] > 70).astype(int)
@@ -150,11 +155,15 @@ class UltraFastWeeklyRetrainer:
         # This is 100x faster than groupby().apply()
         price_col = 'close_price'
         volume_col = 'volume'
+        high_col = 'high_price'
+        low_col = 'low_price'
         
         # Moving Averages (vectorized with transform)
+        df['sma_5'] = df.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=5, min_periods=1).mean())
         df['sma_20'] = df.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=20, min_periods=1).mean())
         df['sma_50'] = df.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=50, min_periods=1).mean())
         df['ema_20'] = df.groupby('ticker')[price_col].transform(lambda x: x.ewm(span=20, min_periods=1).mean())
+        df['ema_50'] = df.groupby('ticker')[price_col].transform(lambda x: x.ewm(span=50, min_periods=1).mean())
         
         # MACD components (vectorized)
         df['ema_12'] = df.groupby('ticker')[price_col].transform(lambda x: x.ewm(span=12, min_periods=1).mean())
@@ -169,21 +178,81 @@ class UltraFastWeeklyRetrainer:
         # Price vs MA ratios (vectorized with safe division)
         df['price_vs_sma20'] = np.where(df['sma_20'] > 0, df[price_col] / df['sma_20'], 1.0)
         df['price_vs_sma50'] = np.where(df['sma_50'] > 0, df[price_col] / df['sma_50'], 1.0)
+        df['price_vs_ema20'] = np.where(df['ema_20'] > 0, df[price_col] / df['ema_20'], 1.0)
         df['sma20_vs_sma50'] = np.where(df['sma_50'] > 0, df['sma_20'] / df['sma_50'], 1.0)
+        df['ema20_vs_ema50'] = np.where(df['ema_50'] > 0, df['ema_20'] / df['ema_50'], 1.0)
+        df['sma5_vs_sma20'] = np.where(df['sma_20'] > 0, df['sma_5'] / df['sma_20'], 1.0)
         
         # Volume indicators (vectorized)
         df['volume_sma_20'] = df.groupby('ticker')[volume_col].transform(lambda x: x.rolling(window=20, min_periods=1).mean())
         df['volume_sma_ratio'] = np.where(df['volume_sma_20'] > 0, df[volume_col] / df['volume_sma_20'], 1.0)
         
         # Momentum (vectorized)
+        df['price_momentum_5'] = df.groupby('ticker')[price_col].transform(lambda x: x / x.shift(5))
         df['price_momentum_10'] = df.groupby('ticker')[price_col].transform(lambda x: x / x.shift(10))
         df['rsi_momentum'] = df.groupby('ticker')['RSI'].transform(lambda x: x.diff())
         
         # Volatility (vectorized)
         df['price_volatility_10'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change().rolling(window=10, min_periods=1).std())
+        df['price_volatility_20'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change().rolling(window=20, min_periods=1).std())
         
-        # Handle NaN values efficiently
-        df = df.fillna(method='bfill').fillna(0)
+        # Trend strength
+        df['trend_strength_10'] = df.groupby('ticker')[price_col].transform(
+            lambda x: x.rolling(window=10, min_periods=1).apply(
+                lambda y: (y.iloc[-1] - y.iloc[0]) / y.std() if len(y) > 1 and y.std() != 0 else 0
+            )
+        )
+        
+        # ================================================================
+        # NEW PHASE 2: Additional technical indicators
+        # ================================================================
+        
+        # --- Bollinger Bands (20-period, 2 std) ---
+        bb_sma = df.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=20, min_periods=1).mean())
+        bb_std = df.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=20, min_periods=1).std())
+        bb_upper = bb_sma + 2 * bb_std
+        bb_lower = bb_sma - 2 * bb_std
+        bb_range = bb_upper - bb_lower
+        df['bollinger_pctb'] = np.where(bb_range > 0, (df[price_col] - bb_lower) / bb_range, 0.5)
+        df['bollinger_bandwidth'] = np.where(bb_sma > 0, bb_range / bb_sma, 0)
+        
+        # --- Stochastic Oscillator (14-period) ---
+        low_14 = df.groupby('ticker')[low_col].transform(lambda x: x.rolling(window=14, min_periods=1).min())
+        high_14 = df.groupby('ticker')[high_col].transform(lambda x: x.rolling(window=14, min_periods=1).max())
+        stoch_range = high_14 - low_14
+        df['stochastic_k'] = np.where(stoch_range > 0, (df[price_col] - low_14) / stoch_range * 100, 50)
+        df['stochastic_d'] = df.groupby('ticker')['stochastic_k'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+        
+        # --- ATR (Average True Range, 14-period) ---
+        prev_close = df.groupby('ticker')[price_col].transform(lambda x: x.shift(1))
+        high_low = df[high_col] - df[low_col]
+        high_close = (df[high_col] - prev_close).abs()
+        low_close = (df[low_col] - prev_close).abs()
+        true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+        df['_true_range'] = true_range
+        df['atr_14'] = df.groupby('ticker')['_true_range'].transform(lambda x: x.rolling(window=14, min_periods=1).mean())
+        df['atr_ratio'] = np.where(df[price_col] > 0, df['atr_14'] / df[price_col], 0)
+        df = df.drop(['_true_range'], axis=1)
+        
+        # --- Normalized MACD (percentage of price) ---
+        df['macd_normalized'] = np.where(df[price_col] > 0, df['macd'] / df[price_col] * 100, 0)
+        df['macd_signal_normalized'] = np.where(df[price_col] > 0, df['macd_signal'] / df[price_col] * 100, 0)
+        df['macd_histogram_normalized'] = np.where(df[price_col] > 0, df['macd_histogram'] / df[price_col] * 100, 0)
+        
+        # --- Lagged returns ---
+        df['return_1d'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(1))
+        df['return_2d'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(2))
+        df['return_3d'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(3))
+        df['return_5d'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(5))
+        df['return_10d'] = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(10))
+        
+        # --- RSI-Price divergence ---
+        price_dir_5 = df.groupby('ticker')[price_col].transform(lambda x: np.sign(x.pct_change(5)))
+        rsi_dir_5 = df.groupby('ticker')['RSI'].transform(lambda x: np.sign(x.diff(5)))
+        df['rsi_price_divergence'] = (price_dir_5 != rsi_dir_5).astype(int)
+        
+        # Handle NaN values - use FORWARD fill only (bfill causes data leakage)
+        df = df.fillna(method='ffill').fillna(0)
         
         print(f"[FEATURES] Complete - {df.shape[1]} features")
         return df
@@ -193,8 +262,27 @@ class UltraFastWeeklyRetrainer:
         print("[PREP] Preparing ML dataset...")
         
         target_column = 'rsi_trade_signal'
-        exclude_cols = ['trading_date', 'ticker', target_column]
-        feature_cols = [col for col in df_features.columns if col not in exclude_cols]
+        # Explicit feature list - MUST match predict_trading_signals.py (same order)
+        feature_cols = [
+            'RSI', 'daily_volatility', 'daily_return',
+            'price_position', 'gap_pct',
+            'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
+            'price_vs_sma20', 'price_vs_sma50', 'price_vs_ema20',
+            'sma20_vs_sma50', 'ema20_vs_ema50', 'sma5_vs_sma20',
+            'volume_sma_ratio',
+            'price_momentum_5', 'price_momentum_10',
+            'price_volatility_10', 'price_volatility_20',
+            'trend_strength_10',
+            'day_of_week', 'month',
+            'bollinger_pctb', 'bollinger_bandwidth',
+            'stochastic_k', 'stochastic_d',
+            'atr_ratio',
+            'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
+            'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
+            'rsi_price_divergence',
+        ]
+        # Filter to only features that exist in the DataFrame
+        feature_cols = [col for col in feature_cols if col in df_features.columns]
         
         X = df_features[feature_cols].copy()
         y = df_features[target_column].copy()
@@ -233,17 +321,21 @@ class UltraFastWeeklyRetrainer:
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
-        # Gradient Boosting model (50 estimators for speed - minimal accuracy loss)
+        # Gradient Boosting model with regularization and class balancing
         model = GradientBoostingClassifier(
             n_estimators=50, 
             learning_rate=0.1, 
-            max_depth=5, 
+            max_depth=5,
+            min_samples_split=5, subsample=0.8,  # Regularization
             random_state=42
         )
         
-        # Train
+        # Compute sample weights for class balancing
+        sample_weights = compute_sample_weight('balanced', y_train)
+        
+        # Train with balanced sample weights
         print("[TRAIN] Training model...")
-        model.fit(X_train_scaled, y_train)
+        model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         
         # Evaluate
         y_pred = model.predict(X_test_scaled)

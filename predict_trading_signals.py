@@ -58,8 +58,8 @@ class TradingSignalPredictor:
     def __init__(self, model_path=None, scaler_path=None, encoder_path=None):
         """Initialize the predictor with saved model artifacts"""
         
-        # Default paths (updated for rebalanced model)
-        self.model_path = model_path or 'data/best_model_extra_trees.joblib'
+        # Default paths (updated for improved model with new features)
+        self.model_path = model_path or 'data/best_model_gradient_boosting.joblib'
         self.scaler_path = scaler_path or 'data/scaler.joblib'
         self.encoder_path = encoder_path or 'data/target_encoder.joblib'
         
@@ -69,22 +69,36 @@ class TradingSignalPredictor:
         # Database connection
         self.db = SQLServerConnection()
         
-        # Feature columns (must match training)
+        # Feature columns (must match training - only relative/normalized features)
         self.feature_columns = [
-            'open_price', 'high_price', 'low_price', 'close_price', 'volume', 
-            'RSI', 'daily_volatility', 'daily_return', 'volume_millions',
-            'price_range', 'price_position', 'gap', 'volume_price_trend',
+            # Relative price features
+            'RSI', 'daily_volatility', 'daily_return',
+            'price_position', 'gap_pct',
             'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
-            'sma_5', 'sma_10', 'sma_20', 'sma_50',
-            'ema_5', 'ema_10', 'ema_20', 'ema_50',
-            'macd', 'macd_signal', 'macd_histogram',
+            # Price vs MA ratios
             'price_vs_sma20', 'price_vs_sma50', 'price_vs_ema20',
             'sma20_vs_sma50', 'ema20_vs_ema50', 'sma5_vs_sma20',
-            'volume_sma_20', 'volume_sma_ratio',
+            # Volume ratio
+            'volume_sma_ratio',
+            # Momentum ratios
             'price_momentum_5', 'price_momentum_10',
+            # Volatility
             'price_volatility_10', 'price_volatility_20',
             'trend_strength_10',
-            'day_of_week', 'month'
+            # Time features
+            'day_of_week', 'month',
+            # NEW Phase 2: Bollinger Bands
+            'bollinger_pctb', 'bollinger_bandwidth',
+            # NEW Phase 2: Stochastic Oscillator
+            'stochastic_k', 'stochastic_d',
+            # NEW Phase 2: ATR (normalized)
+            'atr_ratio',
+            # NEW Phase 2: Normalized MACD
+            'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
+            # NEW Phase 2: Lagged returns
+            'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
+            # NEW Phase 2: RSI divergence
+            'rsi_price_divergence',
         ]
     
     def load_model_artifacts(self):
@@ -104,8 +118,12 @@ class TradingSignalPredictor:
             print("Please ensure the model has been trained and saved.")
             sys.exit(1)
     
-    def get_latest_data(self, ticker=None, days_back=5):
-        """Fetch latest stock data for prediction"""
+    def get_latest_data(self, ticker=None, days_back=80):
+        """Fetch latest stock data for prediction.
+        
+        Note: days_back defaults to 80 to ensure sufficient lookback for
+        technical indicators (SMA-50 needs 50 days, ATR-14, Stochastic-14, etc.)
+        """
         
         if ticker:
             ticker_filter = f"AND h.ticker = '{ticker}'"
@@ -113,7 +131,7 @@ class TradingSignalPredictor:
             ticker_filter = ""
         
         query = f"""
-        SELECT TOP 1000
+        SELECT TOP 10000
             h.trading_date,
             h.ticker,
             h.company,
@@ -160,6 +178,12 @@ class TradingSignalPredictor:
         df_features['price_range'] = df_features['high_price'] - df_features['low_price']
         df_features['price_position'] = (df_features['close_price'] - df_features['low_price']) / df_features['price_range']
         df_features['gap'] = df_features.groupby('ticker')['open_price'].diff() - df_features.groupby('ticker')['close_price'].shift(1)
+        # Normalized gap as percentage of close price (ticker-independent)
+        df_features['gap_pct'] = np.where(
+            df_features['close_price'] > 0,
+            df_features['gap'] / df_features['close_price'] * 100,
+            0
+        )
         df_features['volume_price_trend'] = df_features['volume'] * df_features['daily_return']
         df_features['rsi_oversold'] = (df_features['RSI'] < 30).astype(int)
         df_features['rsi_overbought'] = (df_features['RSI'] > 70).astype(int)
@@ -173,8 +197,8 @@ class TradingSignalPredictor:
         df_features['day_of_week'] = df_features['trading_date'].dt.dayofweek
         df_features['month'] = df_features['trading_date'].dt.month
         
-        # Handle NaN values
-        df_features = df_features.fillna(method='bfill').fillna(0)
+        # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
+        df_features = df_features.fillna(method='ffill').fillna(0)
         
         return df_features
     
@@ -236,13 +260,64 @@ class TradingSignalPredictor:
             )
         )
         
+        # ================================================================
+        # NEW PHASE 2: Additional technical indicators for improved accuracy
+        # ================================================================
+        
+        high_col = 'high_price'
+        low_col = 'low_price'
+        
+        # --- Bollinger Bands (20-period, 2 std) ---
+        bb_sma = df_copy.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=20, min_periods=1).mean())
+        bb_std = df_copy.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=20, min_periods=1).std())
+        bb_upper = bb_sma + 2 * bb_std
+        bb_lower = bb_sma - 2 * bb_std
+        bb_range = bb_upper - bb_lower
+        df_copy['bollinger_pctb'] = np.where(bb_range > 0, (df_copy[price_col] - bb_lower) / bb_range, 0.5)
+        df_copy['bollinger_bandwidth'] = np.where(bb_sma > 0, bb_range / bb_sma, 0)
+        
+        # --- Stochastic Oscillator (14-period) ---
+        low_14 = df_copy.groupby('ticker')[low_col].transform(lambda x: x.rolling(window=14, min_periods=1).min())
+        high_14 = df_copy.groupby('ticker')[high_col].transform(lambda x: x.rolling(window=14, min_periods=1).max())
+        stoch_range = high_14 - low_14
+        df_copy['stochastic_k'] = np.where(stoch_range > 0, (df_copy[price_col] - low_14) / stoch_range * 100, 50)
+        df_copy['stochastic_d'] = df_copy.groupby('ticker')['stochastic_k'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+        
+        # --- ATR (Average True Range, 14-period) ---
+        prev_close = df_copy.groupby('ticker')[price_col].transform(lambda x: x.shift(1))
+        high_low = df_copy[high_col] - df_copy[low_col]
+        high_close = (df_copy[high_col] - prev_close).abs()
+        low_close = (df_copy[low_col] - prev_close).abs()
+        true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+        df_copy['_true_range'] = true_range
+        df_copy['atr_14'] = df_copy.groupby('ticker')['_true_range'].transform(lambda x: x.rolling(window=14, min_periods=1).mean())
+        df_copy['atr_ratio'] = np.where(df_copy[price_col] > 0, df_copy['atr_14'] / df_copy[price_col], 0)
+        df_copy = df_copy.drop(['_true_range'], axis=1)
+        
+        # --- Normalized MACD (percentage of price, ticker-independent) ---
+        df_copy['macd_normalized'] = np.where(df_copy[price_col] > 0, df_copy['macd'] / df_copy[price_col] * 100, 0)
+        df_copy['macd_signal_normalized'] = np.where(df_copy[price_col] > 0, df_copy['macd_signal'] / df_copy[price_col] * 100, 0)
+        df_copy['macd_histogram_normalized'] = np.where(df_copy[price_col] > 0, df_copy['macd_histogram'] / df_copy[price_col] * 100, 0)
+        
+        # --- Lagged returns (percentage changes at different lookback periods) ---
+        df_copy['return_1d'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(1))
+        df_copy['return_2d'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(2))
+        df_copy['return_3d'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(3))
+        df_copy['return_5d'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(5))
+        df_copy['return_10d'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(10))
+        
+        # --- RSI-Price divergence ---
+        price_dir_5 = df_copy.groupby('ticker')[price_col].transform(lambda x: np.sign(x.pct_change(5)))
+        rsi_dir_5 = df_copy.groupby('ticker')['RSI'].transform(lambda x: np.sign(x.diff(5)))
+        df_copy['rsi_price_divergence'] = (price_dir_5 != rsi_dir_5).astype(int)
+        
         return df_copy
     
     def predict_signals(self, ticker=None, date=None, confidence_threshold=0.7):
         """Make trading signal predictions"""
         
-        # Get data
-        df = self.get_latest_data(ticker, days_back=10)
+        # Get data (80 days lookback for technical indicator warm-up)
+        df = self.get_latest_data(ticker, days_back=80)
         if df is None:
             return None
         

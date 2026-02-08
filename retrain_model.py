@@ -31,6 +31,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, confusion_matrix
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.utils.class_weight import compute_sample_weight
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
@@ -256,6 +258,12 @@ class ModelRetrainer:
         df_features = df_features.sort_values(['ticker', 'trading_date'])
         
         df_features['gap'] = df_features.groupby('ticker')['open_price'].diff() - df_features.groupby('ticker')['close_price'].shift(1)
+        # Normalized gap as percentage of close price (ticker-independent)
+        df_features['gap_pct'] = np.where(
+            df_features['close_price'] > 0,
+            df_features['gap'] / df_features['close_price'] * 100,
+            0
+        )
         df_features['volume_price_trend'] = df_features['volume'] * df_features['daily_return']
         df_features['rsi_oversold'] = (df_features['RSI'] < 30).astype(int)
         df_features['rsi_overbought'] = (df_features['RSI'] > 70).astype(int)
@@ -269,8 +277,8 @@ class ModelRetrainer:
         df_features['day_of_week'] = df_features['trading_date'].dt.dayofweek
         df_features['month'] = df_features['trading_date'].dt.month
         
-        # Handle NaN values
-        df_features = df_features.fillna(method='bfill').fillna(0)
+        # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
+        df_features = df_features.fillna(method='ffill').fillna(0)
         
         print(f"[SUCCESS] Feature engineering complete: {df_features.shape[1]} total features")
         return df_features
@@ -292,6 +300,8 @@ class ModelRetrainer:
         # Use close_price column name (database naming convention)
         price_col = 'close_price'
         volume_col = 'volume'
+        high_col = 'high_price'
+        low_col = 'low_price'
         
         # Simple Moving Averages
         df['sma_5'] = df[price_col].rolling(window=5).mean()
@@ -339,6 +349,55 @@ class ModelRetrainer:
             lambda x: (x.iloc[-1] - x.iloc[0]) / x.std() if x.std() != 0 else 0
         )
         
+        # ================================================================
+        # NEW PHASE 2: Additional technical indicators for improved accuracy
+        # ================================================================
+        
+        # --- Bollinger Bands (20-period, 2 std) ---
+        bb_sma = df[price_col].rolling(window=20).mean()
+        bb_std = df[price_col].rolling(window=20).std()
+        bb_upper = bb_sma + 2 * bb_std
+        bb_lower = bb_sma - 2 * bb_std
+        bb_range = bb_upper - bb_lower
+        # %B: where price sits within the bands (0=lower, 1=upper)
+        df['bollinger_pctb'] = np.where(bb_range > 0, (df[price_col] - bb_lower) / bb_range, 0.5)
+        # Bandwidth: width of bands relative to SMA (volatility measure)
+        df['bollinger_bandwidth'] = np.where(bb_sma > 0, bb_range / bb_sma, 0)
+        
+        # --- Stochastic Oscillator (14-period) ---
+        low_14 = df[low_col].rolling(window=14).min()
+        high_14 = df[high_col].rolling(window=14).max()
+        stoch_range = high_14 - low_14
+        df['stochastic_k'] = np.where(stoch_range > 0, (df[price_col] - low_14) / stoch_range * 100, 50)
+        df['stochastic_d'] = df['stochastic_k'].rolling(window=3).mean()
+        
+        # --- ATR (Average True Range, 14-period) ---
+        high_low = df[high_col] - df[low_col]
+        high_close = (df[high_col] - df[price_col].shift(1)).abs()
+        low_close = (df[low_col] - df[price_col].shift(1)).abs()
+        true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+        df['atr_14'] = pd.Series(true_range, index=df.index).rolling(window=14).mean()
+        # Normalized ATR as ratio of price (ticker-independent)
+        df['atr_ratio'] = np.where(df[price_col] > 0, df['atr_14'] / df[price_col], 0)
+        
+        # --- Normalized MACD (percentage of price, ticker-independent) ---
+        df['macd_normalized'] = np.where(df[price_col] > 0, df['macd'] / df[price_col] * 100, 0)
+        df['macd_signal_normalized'] = np.where(df[price_col] > 0, df['macd_signal'] / df[price_col] * 100, 0)
+        df['macd_histogram_normalized'] = np.where(df[price_col] > 0, df['macd_histogram'] / df[price_col] * 100, 0)
+        
+        # --- Lagged returns (percentage changes at different lookback periods) ---
+        df['return_1d'] = df[price_col].pct_change(1)
+        df['return_2d'] = df[price_col].pct_change(2)
+        df['return_3d'] = df[price_col].pct_change(3)
+        df['return_5d'] = df[price_col].pct_change(5)
+        df['return_10d'] = df[price_col].pct_change(10)
+        
+        # --- RSI-Price divergence (RSI direction differs from price direction) ---
+        if 'RSI' in df.columns:
+            price_dir_5 = np.sign(df[price_col].pct_change(5))
+            rsi_dir_5 = np.sign(df['RSI'].diff(5))
+            df['rsi_price_divergence'] = (price_dir_5 != rsi_dir_5).astype(int)
+        
         return df
     
     def prepare_ml_dataset(self, df_features):
@@ -346,8 +405,28 @@ class ModelRetrainer:
         safe_print("🧮 Preparing ML dataset...")
         
         target_column = 'rsi_trade_signal'
-        exclude_cols = ['trading_date', 'ticker', 'company', target_column]
-        feature_cols = [col for col in df_features.columns if col not in exclude_cols]
+        # Explicit feature list - only relative/normalized features (no raw prices)
+        # MUST match predict_trading_signals.py feature_columns exactly (same order)
+        feature_cols = [
+            'RSI', 'daily_volatility', 'daily_return',
+            'price_position', 'gap_pct',
+            'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
+            'price_vs_sma20', 'price_vs_sma50', 'price_vs_ema20',
+            'sma20_vs_sma50', 'ema20_vs_ema50', 'sma5_vs_sma20',
+            'volume_sma_ratio',
+            'price_momentum_5', 'price_momentum_10',
+            'price_volatility_10', 'price_volatility_20',
+            'trend_strength_10',
+            'day_of_week', 'month',
+            'bollinger_pctb', 'bollinger_bandwidth',
+            'stochastic_k', 'stochastic_d',
+            'atr_ratio',
+            'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
+            'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
+            'rsi_price_divergence',
+        ]
+        # Filter to only features that exist in the DataFrame
+        feature_cols = [col for col in feature_cols if col in df_features.columns]
         
         X = df_features[feature_cols].copy()
         y = df_features[target_column].copy()
@@ -384,11 +463,11 @@ class ModelRetrainer:
         """Train and compare ML models"""
         safe_print("🤖 Training machine learning models...")
         
-        # Time-aware split
+        # Time-aware split (sort by index which preserves chronological order)
         df_temp = pd.DataFrame({'y': y}, index=X.index)
         date_sorted_idx = X.index.to_series().sort_values().index
         X_sorted = X.loc[date_sorted_idx]
-        y_sorted = y[date_sorted_idx]
+        y_sorted = df_temp.loc[date_sorted_idx, 'y'].values  # Use pandas label indexing
         
         split_idx = int(0.8 * len(X_sorted))
         X_train = X_sorted.iloc[:split_idx]
@@ -401,6 +480,9 @@ class ModelRetrainer:
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         
+        # Compute sample weights for class balancing (used by Gradient Boosting)
+        sample_weights = compute_sample_weight('balanced', y_train)
+        
         # Initialize models with better class balancing and calibration
         models = {
             'Random Forest': RandomForestClassifier(
@@ -409,7 +491,9 @@ class ModelRetrainer:
                 random_state=42, n_jobs=-1
             ),
             'Gradient Boosting': GradientBoostingClassifier(
-                n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42
+                n_estimators=100, learning_rate=0.1, max_depth=6,
+                min_samples_split=5, subsample=0.8,  # Regularization to reduce overfitting
+                random_state=42
             ),
             'Logistic Regression': LogisticRegression(
                 class_weight='balanced', random_state=42, max_iter=1000,
@@ -426,14 +510,17 @@ class ModelRetrainer:
         # Train models
         model_results = {}
         trained_models = {}
-        cv_splitter = TimeSeriesSplit(n_splits=3)
+        cv_splitter = TimeSeriesSplit(n_splits=5)  # Increased from 3 for more robust validation
         
         for model_name, model in models.items():
             print(f"  Training {model_name}...")
             
             try:
-                # Train
-                model.fit(X_train_scaled, y_train)
+                # Train - use sample weights for Gradient Boosting (no native class_weight)
+                if model_name == 'Gradient Boosting':
+                    model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+                else:
+                    model.fit(X_train_scaled, y_train)
                 
                 # Predict
                 y_pred = model.predict(X_test_scaled)
@@ -471,6 +558,18 @@ class ModelRetrainer:
         best_model_name = max(model_results.keys(), 
                              key=lambda k: model_results[k]['f1_score'])
         best_model = trained_models[best_model_name]
+        
+        # Calibrate probabilities for the best model (fixes uncalibrated confidence scores)
+        print("[CONFIG] Calibrating model probabilities...")
+        try:
+            calibrated_model = CalibratedClassifierCV(
+                estimator=best_model, cv='prefit', method='sigmoid'
+            )
+            calibrated_model.fit(X_test_scaled, y_test)
+            best_model = calibrated_model
+            print("[SUCCESS] Probability calibration applied successfully")
+        except Exception as e:
+            print(f"[WARN] Calibration skipped: {e}")
         
         safe_print(f"🏆 Best model: {best_model_name} (F1: {model_results[best_model_name]['f1_score']:.3f})")
         
