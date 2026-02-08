@@ -55,13 +55,14 @@ def safe_print(text):
 class TradingSignalPredictor:
     """Production trading signal prediction system"""
     
-    def __init__(self, model_path=None, scaler_path=None, encoder_path=None):
+    def __init__(self, model_path=None, scaler_path=None, encoder_path=None, sector_encoder_path=None):
         """Initialize the predictor with saved model artifacts"""
         
         # Default paths (updated for improved model with new features)
         self.model_path = model_path or 'data/best_model_gradient_boosting.joblib'
         self.scaler_path = scaler_path or 'data/scaler.joblib'
         self.encoder_path = encoder_path or 'data/target_encoder.joblib'
+        self.sector_encoder_path = sector_encoder_path or 'data/sector_encoder.joblib'
         
         # Load model artifacts
         self.load_model_artifacts()
@@ -71,34 +72,30 @@ class TradingSignalPredictor:
         
         # Feature columns (must match training - only relative/normalized features)
         self.feature_columns = [
-            # Relative price features
+            # Technical indicators (Phase 1 + 2)
             'RSI', 'daily_volatility', 'daily_return',
             'price_position', 'gap_pct',
             'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
-            # Price vs MA ratios
             'price_vs_sma20', 'price_vs_sma50', 'price_vs_ema20',
             'sma20_vs_sma50', 'ema20_vs_ema50', 'sma5_vs_sma20',
-            # Volume ratio
             'volume_sma_ratio',
-            # Momentum ratios
             'price_momentum_5', 'price_momentum_10',
-            # Volatility
             'price_volatility_10', 'price_volatility_20',
             'trend_strength_10',
-            # Time features
             'day_of_week', 'month',
-            # NEW Phase 2: Bollinger Bands
             'bollinger_pctb', 'bollinger_bandwidth',
-            # NEW Phase 2: Stochastic Oscillator
             'stochastic_k', 'stochastic_d',
-            # NEW Phase 2: ATR (normalized)
             'atr_ratio',
-            # NEW Phase 2: Normalized MACD
             'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
-            # NEW Phase 2: Lagged returns
             'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
-            # NEW Phase 2: RSI divergence
             'rsi_price_divergence',
+            # Phase 3: Fundamental features
+            'beta', 'forward_pe', 'trailing_pe',
+            'profit_margin', 'revenue_growth', 'earnings_growth',
+            'debt_to_equity', 'return_on_equity', 'current_ratio',
+            'dividend_yield',
+            'price_vs_52wk_high', 'price_vs_52wk_low', 'price_vs_200d_avg',
+            'sector_encoded',
         ]
     
     def load_model_artifacts(self):
@@ -112,6 +109,14 @@ class TradingSignalPredictor:
             # Get class names
             self.class_names = self.target_encoder.classes_
             safe_print(f"📊 Target classes: {list(self.class_names)}")
+            
+            # Load sector encoder (optional - may not exist for older models)
+            try:
+                self.sector_encoder = joblib.load(self.sector_encoder_path)
+                safe_print(f"📊 Sector encoder loaded: {len(self.sector_encoder.classes_)} sectors")
+            except FileNotFoundError:
+                self.sector_encoder = None
+                print("[INFO] No sector encoder found - sector features will default to 0")
             
         except FileNotFoundError as e:
             safe_print(f"❌ Error loading model artifacts: {e}")
@@ -147,17 +152,53 @@ class TradingSignalPredictor:
             ON h.ticker = r.ticker AND h.trading_date = r.trading_date
         WHERE h.trading_date >= DATEADD(day, -{days_back}, CAST(GETDATE() AS DATE))
             {ticker_filter}
-        ORDER BY h.trading_date DESC, h.ticker        """
+        ORDER BY h.trading_date DESC, h.ticker
+        """
         
         try:
             df = self.db.execute_query(query)
             if df.empty:
                 safe_print(f"⚠️  No data found for ticker: {ticker}")
                 return None
+            
+            # Merge fundamentals & sector data (separate queries for speed)
+            df = self._merge_fundamentals(df)
             return df
         except Exception as e:
             safe_print(f"❌ Error fetching data: {e}")
             return None
+    
+    def _merge_fundamentals(self, df):
+        """Load fundamentals & sector data separately and merge into main DataFrame"""
+        try:
+            fund_query = """
+            SELECT f1.ticker, f1.beta, f1.forward_pe, f1.trailing_pe,
+                   f1.profit_margin, f1.revenue_growth, f1.earnings_growth,
+                   f1.debt_to_equity, f1.return_on_equity, f1.current_ratio,
+                   f1.dividend_yield, f1.fifty_two_week_high, f1.fifty_two_week_low,
+                   f1.two_hundred_day_avg
+            FROM dbo.nasdaq_100_fundamentals f1
+            INNER JOIN (
+                SELECT ticker, MAX(fetch_date) as max_date
+                FROM dbo.nasdaq_100_fundamentals
+                GROUP BY ticker
+            ) f2 ON f1.ticker = f2.ticker AND f1.fetch_date = f2.max_date
+            """
+            df_fund = self.db.execute_query(fund_query)
+            if not df_fund.empty:
+                df = df.merge(df_fund, on='ticker', how='left')
+        except Exception as e:
+            print(f"[WARN] Could not load fundamentals: {e}")
+        
+        try:
+            sector_query = "SELECT ticker, sector FROM dbo.nasdaq_top100"
+            df_sector = self.db.execute_query(sector_query)
+            if not df_sector.empty:
+                df = df.merge(df_sector, on='ticker', how='left')
+        except Exception as e:
+            print(f"[WARN] Could not load sector data: {e}")
+        
+        return df
     
     def engineer_features(self, df):
         """Apply feature engineering to raw data"""
@@ -196,6 +237,40 @@ class TradingSignalPredictor:
         df_features['trading_date'] = pd.to_datetime(df_features['trading_date'])
         df_features['day_of_week'] = df_features['trading_date'].dt.dayofweek
         df_features['month'] = df_features['trading_date'].dt.month
+        
+        # ================================================================
+        # PHASE 3: Fundamental features from nasdaq_100_fundamentals
+        # ================================================================
+        
+        # Computed price vs key fundamental levels (relative/normalized)
+        if 'fifty_two_week_high' in df_features.columns:
+            df_features['price_vs_52wk_high'] = np.where(
+                df_features['fifty_two_week_high'] > 0,
+                df_features['close_price'] / df_features['fifty_two_week_high'],
+                0
+            )
+        if 'fifty_two_week_low' in df_features.columns:
+            df_features['price_vs_52wk_low'] = np.where(
+                df_features['fifty_two_week_low'] > 0,
+                df_features['close_price'] / df_features['fifty_two_week_low'],
+                0
+            )
+        if 'two_hundred_day_avg' in df_features.columns:
+            df_features['price_vs_200d_avg'] = np.where(
+                df_features['two_hundred_day_avg'] > 0,
+                df_features['close_price'] / df_features['two_hundred_day_avg'],
+                0
+            )
+        
+        # Sector encoding (use saved encoder for consistency with training)
+        if 'sector' in df_features.columns and self.sector_encoder is not None:
+            sector_values = df_features['sector'].fillna('Unknown')
+            # Handle unseen sectors gracefully
+            known_classes = set(self.sector_encoder.classes_)
+            sector_values = sector_values.apply(lambda x: x if x in known_classes else 'Unknown')
+            df_features['sector_encoded'] = self.sector_encoder.transform(sector_values)
+        else:
+            df_features['sector_encoded'] = 0
         
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
         df_features = df_features.fillna(method='ffill').fillna(0)

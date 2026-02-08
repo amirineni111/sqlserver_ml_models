@@ -44,6 +44,9 @@ class UltraFastWeeklyRetrainer:
         self.data_dir = Path('data')
         self.backup_dir = Path('data/backups') if backup_old else None
         
+        # Sector encoder (fitted during feature engineering, saved with model)
+        self.sector_encoder = None
+        
         # Create directories
         self.data_dir.mkdir(exist_ok=True)
         if self.backup_dir:
@@ -108,11 +111,52 @@ class UltraFastWeeklyRetrainer:
             if df.empty:
                 raise ValueError("No data found in database")
             
+            # Merge fundamentals & sector data (separate queries for speed)
+            df = self._merge_fundamentals(df)
+            
             return df
             
         except Exception as e:
             print(f"[ERROR] Error loading data: {e}")
             raise
+    
+    def _merge_fundamentals(self, df):
+        """Load fundamentals & sector data separately and merge into main DataFrame"""
+        print("[DATA] Loading fundamental data...")
+        
+        try:
+            fund_query = """
+            SELECT f1.ticker, f1.beta, f1.forward_pe, f1.trailing_pe,
+                   f1.profit_margin, f1.revenue_growth, f1.earnings_growth,
+                   f1.debt_to_equity, f1.return_on_equity, f1.current_ratio,
+                   f1.dividend_yield, f1.fifty_two_week_high, f1.fifty_two_week_low,
+                   f1.two_hundred_day_avg
+            FROM dbo.nasdaq_100_fundamentals f1
+            INNER JOIN (
+                SELECT ticker, MAX(fetch_date) as max_date
+                FROM dbo.nasdaq_100_fundamentals
+                GROUP BY ticker
+            ) f2 ON f1.ticker = f2.ticker AND f1.fetch_date = f2.max_date
+            """
+            df_fund = self.db.execute_query(fund_query)
+            print(f"  Fundamentals loaded: {len(df_fund)} tickers")
+            
+            if not df_fund.empty:
+                df = df.merge(df_fund, on='ticker', how='left')
+        except Exception as e:
+            print(f"  [WARN] Could not load fundamentals: {e}")
+        
+        try:
+            sector_query = "SELECT ticker, sector FROM dbo.nasdaq_top100"
+            df_sector = self.db.execute_query(sector_query)
+            print(f"  Sectors loaded: {len(df_sector)} tickers")
+            
+            if not df_sector.empty:
+                df = df.merge(df_sector, on='ticker', how='left')
+        except Exception as e:
+            print(f"  [WARN] Could not load sector data: {e}")
+        
+        return df
     
     def engineer_features_vectorized(self, df):
         """ULTRA-FAST feature engineering using VECTORIZED operations - NO groupby().apply()"""
@@ -251,6 +295,42 @@ class UltraFastWeeklyRetrainer:
         rsi_dir_5 = df.groupby('ticker')['RSI'].transform(lambda x: np.sign(x.diff(5)))
         df['rsi_price_divergence'] = (price_dir_5 != rsi_dir_5).astype(int)
         
+        # ================================================================
+        # PHASE 3: Fundamental features from nasdaq_100_fundamentals
+        # ================================================================
+        print("[FEATURES] Adding fundamental features...")
+        
+        # Computed price vs key fundamental levels (relative/normalized)
+        if 'fifty_two_week_high' in df.columns:
+            df['price_vs_52wk_high'] = np.where(
+                df['fifty_two_week_high'] > 0,
+                df[price_col] / df['fifty_two_week_high'],
+                0
+            )
+        if 'fifty_two_week_low' in df.columns:
+            df['price_vs_52wk_low'] = np.where(
+                df['fifty_two_week_low'] > 0,
+                df[price_col] / df['fifty_two_week_low'],
+                0
+            )
+        if 'two_hundred_day_avg' in df.columns:
+            df['price_vs_200d_avg'] = np.where(
+                df['two_hundred_day_avg'] > 0,
+                df[price_col] / df['two_hundred_day_avg'],
+                0
+            )
+        
+        # Sector encoding (label encoded - works well with tree-based models)
+        if 'sector' in df.columns:
+            from sklearn.preprocessing import LabelEncoder
+            self.sector_encoder = LabelEncoder()
+            df['sector_encoded'] = self.sector_encoder.fit_transform(
+                df['sector'].fillna('Unknown')
+            )
+            print(f"  Sectors found: {len(self.sector_encoder.classes_)} unique")
+        else:
+            df['sector_encoded'] = 0
+        
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage)
         df = df.fillna(method='ffill').fillna(0)
         
@@ -264,6 +344,7 @@ class UltraFastWeeklyRetrainer:
         target_column = 'rsi_trade_signal'
         # Explicit feature list - MUST match predict_trading_signals.py (same order)
         feature_cols = [
+            # Technical indicators (Phase 1 + 2)
             'RSI', 'daily_volatility', 'daily_return',
             'price_position', 'gap_pct',
             'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
@@ -280,6 +361,13 @@ class UltraFastWeeklyRetrainer:
             'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
             'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
             'rsi_price_divergence',
+            # Phase 3: Fundamental features
+            'beta', 'forward_pe', 'trailing_pe',
+            'profit_margin', 'revenue_growth', 'earnings_growth',
+            'debt_to_equity', 'return_on_equity', 'current_ratio',
+            'dividend_yield',
+            'price_vs_52wk_high', 'price_vs_52wk_low', 'price_vs_200d_avg',
+            'sector_encoded',
         ]
         # Filter to only features that exist in the DataFrame
         feature_cols = [col for col in feature_cols if col in df_features.columns]
@@ -374,6 +462,11 @@ class UltraFastWeeklyRetrainer:
         # Save preprocessing artifacts
         joblib.dump(training_results['scaler'], self.data_dir / 'scaler.joblib')
         joblib.dump(target_encoder, self.data_dir / 'target_encoder.joblib')
+        
+        # Save sector encoder (for consistent encoding during prediction)
+        if self.sector_encoder is not None:
+            joblib.dump(self.sector_encoder, self.data_dir / 'sector_encoder.joblib')
+            print(f"[SAVE] Sector encoder saved")
         
         print(f"[SAVE] Model saved to {model_path}")
     

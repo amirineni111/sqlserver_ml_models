@@ -91,6 +91,9 @@ class ModelRetrainer:
         self.reports_dir = Path('reports')
         self.backup_dir = Path('data/backups') if backup_old else None
         
+        # Sector encoder (fitted during feature engineering, saved with model)
+        self.sector_encoder = None
+        
         # Create directories
         self.data_dir.mkdir(exist_ok=True)
         self.reports_dir.mkdir(exist_ok=True)
@@ -162,11 +165,56 @@ class ModelRetrainer:
             if df.empty:
                 raise ValueError("No data found in database")
             
+            # Load fundamentals separately and merge (avoids slow SQL JOINs)
+            df = self._merge_fundamentals(df)
+            
             return df
             
         except Exception as e:
             print(f"[ERROR] Error loading data: {e}")
             raise
+    
+    def _merge_fundamentals(self, df):
+        """Load fundamentals & sector data separately and merge into main DataFrame"""
+        print("[DATA] Loading fundamental data...")
+        
+        try:
+            # Load latest fundamentals per ticker
+            fund_query = """
+            SELECT f1.ticker, f1.beta, f1.forward_pe, f1.trailing_pe,
+                   f1.profit_margin, f1.revenue_growth, f1.earnings_growth,
+                   f1.debt_to_equity, f1.return_on_equity, f1.current_ratio,
+                   f1.dividend_yield, f1.fifty_two_week_high, f1.fifty_two_week_low,
+                   f1.two_hundred_day_avg
+            FROM dbo.nasdaq_100_fundamentals f1
+            INNER JOIN (
+                SELECT ticker, MAX(fetch_date) as max_date
+                FROM dbo.nasdaq_100_fundamentals
+                GROUP BY ticker
+            ) f2 ON f1.ticker = f2.ticker AND f1.fetch_date = f2.max_date
+            """
+            df_fund = self.db.execute_query(fund_query)
+            print(f"  Fundamentals loaded: {len(df_fund)} tickers")
+            
+            # Merge fundamentals on ticker
+            if not df_fund.empty:
+                df = df.merge(df_fund, on='ticker', how='left')
+        except Exception as e:
+            print(f"  [WARN] Could not load fundamentals: {e}")
+        
+        try:
+            # Load sector data
+            sector_query = "SELECT ticker, sector FROM dbo.nasdaq_top100"
+            df_sector = self.db.execute_query(sector_query)
+            print(f"  Sectors loaded: {len(df_sector)} tickers")
+            
+            # Merge sector on ticker
+            if not df_sector.empty:
+                df = df.merge(df_sector, on='ticker', how='left')
+        except Exception as e:
+            print(f"  [WARN] Could not load sector data: {e}")
+        
+        return df
     
     def compare_with_previous_data(self, new_df):
         """Compare new data with previously processed data"""
@@ -276,6 +324,41 @@ class ModelRetrainer:
         df_features['trading_date'] = pd.to_datetime(df_features['trading_date'])
         df_features['day_of_week'] = df_features['trading_date'].dt.dayofweek
         df_features['month'] = df_features['trading_date'].dt.month
+        
+        # ================================================================
+        # PHASE 3: Fundamental features from nasdaq_100_fundamentals
+        # ================================================================
+        print("[DATA] Adding fundamental features...")
+        
+        # Computed price vs key fundamental levels (relative/normalized)
+        if 'fifty_two_week_high' in df_features.columns:
+            df_features['price_vs_52wk_high'] = np.where(
+                df_features['fifty_two_week_high'] > 0,
+                df_features['close_price'] / df_features['fifty_two_week_high'],
+                0
+            )
+        if 'fifty_two_week_low' in df_features.columns:
+            df_features['price_vs_52wk_low'] = np.where(
+                df_features['fifty_two_week_low'] > 0,
+                df_features['close_price'] / df_features['fifty_two_week_low'],
+                0
+            )
+        if 'two_hundred_day_avg' in df_features.columns:
+            df_features['price_vs_200d_avg'] = np.where(
+                df_features['two_hundred_day_avg'] > 0,
+                df_features['close_price'] / df_features['two_hundred_day_avg'],
+                0
+            )
+        
+        # Sector encoding (label encoded - works well with tree-based models)
+        if 'sector' in df_features.columns:
+            self.sector_encoder = LabelEncoder()
+            df_features['sector_encoded'] = self.sector_encoder.fit_transform(
+                df_features['sector'].fillna('Unknown')
+            )
+            print(f"  Sectors found: {len(self.sector_encoder.classes_)} unique")
+        else:
+            df_features['sector_encoded'] = 0
         
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
         df_features = df_features.fillna(method='ffill').fillna(0)
@@ -408,6 +491,7 @@ class ModelRetrainer:
         # Explicit feature list - only relative/normalized features (no raw prices)
         # MUST match predict_trading_signals.py feature_columns exactly (same order)
         feature_cols = [
+            # Technical indicators (Phase 1 + 2)
             'RSI', 'daily_volatility', 'daily_return',
             'price_position', 'gap_pct',
             'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
@@ -424,6 +508,13 @@ class ModelRetrainer:
             'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
             'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
             'rsi_price_divergence',
+            # Phase 3: Fundamental features
+            'beta', 'forward_pe', 'trailing_pe',
+            'profit_margin', 'revenue_growth', 'earnings_growth',
+            'debt_to_equity', 'return_on_equity', 'current_ratio',
+            'dividend_yield',
+            'price_vs_52wk_high', 'price_vs_52wk_low', 'price_vs_200d_avg',
+            'sector_encoded',
         ]
         # Filter to only features that exist in the DataFrame
         feature_cols = [col for col in feature_cols if col in df_features.columns]
@@ -597,6 +688,11 @@ class ModelRetrainer:
         # Save preprocessing artifacts
         joblib.dump(training_results['scaler'], 'data/scaler.joblib')
         joblib.dump(target_encoder, 'data/target_encoder.joblib')
+        
+        # Save sector encoder (for consistent encoding during prediction)
+        if self.sector_encoder is not None:
+            joblib.dump(self.sector_encoder, 'data/sector_encoder.joblib')
+            print(f"  Sector encoder: data/sector_encoder.joblib")
         
         # Save complete results
         results_to_save = {
