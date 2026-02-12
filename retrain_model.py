@@ -34,6 +34,42 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.utils.class_weight import compute_sample_weight
 
+
+class PurgedTimeSeriesSplit:
+    """
+    Time series cross-validation with purge gap to prevent data leakage.
+    
+    Unlike standard TimeSeriesSplit, this adds a gap between train and validation
+    sets to prevent information from the future leaking into training data.
+    With 5-day prediction targets, we need at least 5 samples gap to prevent
+    the target (which uses future prices) from leaking between folds.
+    """
+    
+    def __init__(self, n_splits=5, purge_gap=5):
+        self.n_splits = n_splits
+        self.purge_gap = purge_gap
+    
+    def split(self, X, y=None, groups=None):
+        n_samples = len(X)
+        min_train_size = max(50, n_samples // (self.n_splits + 2))
+        fold_size = max(20, (n_samples - min_train_size) // self.n_splits)
+        
+        for i in range(self.n_splits):
+            train_end = min_train_size + i * fold_size
+            val_start = train_end + self.purge_gap
+            val_end = min(val_start + fold_size, n_samples)
+            
+            if val_start >= n_samples or val_end <= val_start:
+                continue
+            
+            train_indices = np.arange(0, train_end)
+            val_indices = np.arange(val_start, val_end)
+            
+            yield train_indices, val_indices
+    
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
 from database.connection import SQLServerConnection
@@ -239,21 +275,21 @@ class ModelRetrainer:
     def perform_eda(self, df):
         """Perform exploratory data analysis"""
         if self.quick_mode:
-            safe_print("⏩ Skipping detailed EDA (quick mode)")
-            return {'data_shape': df.shape, 'target_column': 'rsi_trade_signal', 'target_exists': True}
+            safe_print("Skipping detailed EDA (quick mode)")
+            return {'data_shape': df.shape, 'target_column': 'direction_5d', 'target_exists': True}
         
-        safe_print("🔍 Performing exploratory data analysis...")
+        safe_print("Performing exploratory data analysis...")
         
         # Basic statistics
         print(f"  Data shape: {df.shape}")
         print(f"  Date range: {df['trading_date'].min()} to {df['trading_date'].max()}")
         print(f"  Unique tickers: {df['ticker'].nunique()}")
         
-        # Target analysis
+        # Target analysis (5-day direction will be created in prepare_ml_dataset)
         target_column = 'rsi_trade_signal'
         if target_column in df.columns:
             target_dist = df[target_column].value_counts()
-            print(f"  Target distribution:")
+            print(f"  RSI signal distribution (reference only - not used as target):")
             for signal, count in target_dist.items():
                 pct = (count / len(df)) * 100
                 print(f"    {signal}: {count:,} ({pct:.1f}%)")
@@ -481,13 +517,90 @@ class ModelRetrainer:
             rsi_dir_5 = np.sign(df['RSI'].diff(5))
             df['rsi_price_divergence'] = (price_dir_5 != rsi_dir_5).astype(int)
         
+        # ================================================================
+        # PHASE 3: Market Regime Detection
+        # Helps the model recognize trending vs mean-reverting environments
+        # and suppress signals during volatile regime transitions.
+        # ================================================================
+        
+        # --- Regime: SMA Trend Direction (20-day slope normalized) ---
+        # Positive = uptrend, negative = downtrend, near-zero = sideways
+        sma20 = df[price_col].rolling(window=20).mean()
+        df['regime_sma20_slope'] = sma20.pct_change(5) * 100  # 5-day slope of 20-SMA
+        
+        # --- Regime: ADX-like trend strength (simplified) ---
+        # Based on directional movement: |up moves| vs |down moves| over 14 days
+        up_move = df[high_col].diff()
+        down_move = -df[low_col].diff()
+        pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        pos_dm_smooth = pd.Series(pos_dm, index=df.index).rolling(14).mean()
+        neg_dm_smooth = pd.Series(neg_dm, index=df.index).rolling(14).mean()
+        dm_sum = pos_dm_smooth + neg_dm_smooth
+        # DX = |+DI - -DI| / (+DI + -DI), then smooth for ADX
+        dx = np.where(dm_sum > 0, np.abs(pos_dm_smooth - neg_dm_smooth) / dm_sum * 100, 0)
+        df['regime_adx'] = pd.Series(dx, index=df.index).rolling(14).mean()
+        
+        # --- Regime: Volatility regime (current vol vs long-term vol) ---
+        # >1 = high-vol regime, <1 = low-vol regime
+        vol_short = df[price_col].pct_change().rolling(10).std()
+        vol_long = df[price_col].pct_change().rolling(60).std()
+        df['regime_vol_ratio'] = np.where(vol_long > 0, vol_short / vol_long, 1.0)
+        
+        # --- Regime: Mean reversion indicator (distance from 50-SMA / ATR) ---
+        # Large positive = overbought relative to trend, large negative = oversold
+        sma50 = df[price_col].rolling(window=50).mean()
+        if 'atr_14' in df.columns and df['atr_14'].notna().any():
+            df['regime_mean_reversion'] = np.where(
+                df['atr_14'] > 0,
+                (df[price_col] - sma50) / df['atr_14'],
+                0
+            )
+        else:
+            df['regime_mean_reversion'] = 0
+        
+        # --- Regime: Trend consistency (% of last 20 days that moved in same direction as overall) ---
+        overall_dir = np.sign(df[price_col].diff(20))
+        daily_dirs = np.sign(df[price_col].diff(1))
+        consistent = (daily_dirs == overall_dir).astype(float)
+        df['regime_trend_consistency'] = consistent.rolling(20).mean()
+        
         return df
     
     def prepare_ml_dataset(self, df_features):
-        """Prepare dataset for machine learning"""
-        safe_print("🧮 Preparing ML dataset...")
+        """Prepare dataset for machine learning with 5-day direction target.
         
-        target_column = 'rsi_trade_signal'
+        Previously used rsi_trade_signal (RSI-based) which only fires at extremes
+        and achieved ~50% accuracy (coin flip). Now uses 5-day forward price
+        direction which:
+        - Captures meaningful trends with less noise than 1-day
+        - Uses all data points (not just RSI extremes)
+        - Maps to actionable Buy/Sell signals
+        """
+        safe_print("Preparing ML dataset (5-day direction target)...")
+        
+        # --- Create 5-day forward direction target from price data ---
+        df_features = df_features.sort_values(['ticker', 'trading_date'])
+        df_features['next_5d_close'] = df_features.groupby('ticker')['close_price'].shift(-5)
+        df_features['next_5d_return'] = (
+            (df_features['next_5d_close'] - df_features['close_price'])
+            / df_features['close_price'] * 100
+        )
+        # Buy = price goes up over 5 days, Sell = price goes down
+        df_features['direction_5d'] = np.where(
+            df_features['next_5d_return'] > 0,
+            'Oversold (Buy)',   # Keep legacy label format for downstream compatibility
+            'Overbought (Sell)'
+        )
+        
+        # Report target distribution
+        valid_5d = df_features['next_5d_close'].notna()
+        dist = df_features.loc[valid_5d, 'direction_5d'].value_counts()
+        print(f"  5-day direction distribution:")
+        for signal, count in dist.items():
+            pct = (count / valid_5d.sum()) * 100
+            print(f"    {signal}: {count:,} ({pct:.1f}%)")
+        
         # Explicit feature list - only relative/normalized features (no raw prices)
         # MUST match predict_trading_signals.py feature_columns exactly (same order)
         feature_cols = [
@@ -515,35 +628,72 @@ class ModelRetrainer:
             'dividend_yield',
             'price_vs_52wk_high', 'price_vs_52wk_low', 'price_vs_200d_avg',
             'sector_encoded',
+            # Phase 3: Market regime features
+            'regime_sma20_slope', 'regime_adx', 'regime_vol_ratio',
+            'regime_mean_reversion', 'regime_trend_consistency',
         ]
         # Filter to only features that exist in the DataFrame
         feature_cols = [col for col in feature_cols if col in df_features.columns]
         
         X = df_features[feature_cols].copy()
-        y = df_features[target_column].copy()
+        y = df_features['direction_5d'].copy()
         
-        # Remove rows with missing target (handle both NaN and None values)
-        valid_mask = y.notna() & (y != 'None') & (y.astype(str) != 'None')
+        # Remove rows without 5-day target (last 5 rows per ticker)
+        valid_mask = y.notna() & df_features['next_5d_close'].notna()
         X = X[valid_mask]
         y = y[valid_mask]
         
-        # Convert any remaining None values to a default class if needed
-        y = y.astype(str)
-        
-        # Remove any remaining problematic values
-        valid_classes = ['Overbought (Sell)', 'Oversold (Buy)']
-        class_mask = y.isin(valid_classes)
-        X = X[class_mask]
-        y = y[class_mask]
+        # Remove rows with any NaN features
+        feature_valid = X.notna().all(axis=1)
+        X = X[feature_valid]
+        y = y[feature_valid]
         
         if len(y) == 0:
             raise ValueError("No valid target data found after filtering")
         
-        # Encode target
+        # Encode target (labels: 'Overbought (Sell)' and 'Oversold (Buy)')
         target_encoder = LabelEncoder()
         y_encoded = target_encoder.fit_transform(y)
         
-        print(f"[SUCCESS] ML dataset prepared:")
+        # --- Feature selection: keep top features by tree-based importance ---
+        # Fundamentals (beta, PE ratios, margins) add noise without enough
+        # time-series variation. Let the model tell us what matters.
+        print(f"  All candidate features: {X.shape[1]}")
+        
+        from sklearn.ensemble import RandomForestClassifier as _RFC
+        selector_model = _RFC(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
+        # Quick fit on a sample for speed
+        sample_n = min(20000, len(X))
+        sample_idx = np.random.RandomState(42).choice(len(X), sample_n, replace=False)
+        selector_model.fit(
+            X.iloc[sample_idx].fillna(0).values,
+            y_encoded[sample_idx]
+        )
+        importances = pd.Series(selector_model.feature_importances_, index=feature_cols)
+        importances = importances.sort_values(ascending=False)
+        
+        # Keep top 20 features (sweet spot: enough signal, less noise)
+        top_n = 20
+        selected_features = importances.head(top_n).index.tolist()
+        dropped_features = importances.tail(len(importances) - top_n).index.tolist()
+        
+        print(f"  Top {top_n} features selected by importance:")
+        for i, (feat, imp) in enumerate(importances.head(top_n).items(), 1):
+            print(f"    {i:2d}. {feat}: {imp:.4f}")
+        print(f"  Dropped {len(dropped_features)} low-importance features: {dropped_features[:5]}...")
+        
+        # Filter to selected features
+        X = X[selected_features]
+        feature_cols = selected_features
+        
+        # Save selected feature list for prediction script
+        import json
+        feature_list_path = 'data/selected_features.json'
+        with open(feature_list_path, 'w') as f:
+            json.dump(selected_features, f, indent=2)
+        print(f"  Saved feature list to {feature_list_path}")
+        
+        print(f"[SUCCESS] ML dataset prepared (5-day horizon):")
         print(f"  Features: {X.shape}")
         print(f"  Target classes: {list(target_encoder.classes_)}")
         print(f"  Valid samples: {len(X):,}")
@@ -554,25 +704,47 @@ class ModelRetrainer:
         """Train and compare ML models"""
         safe_print("🤖 Training machine learning models...")
         
-        # Time-aware split (sort by index which preserves chronological order)
+        # Time-aware 3-way split: train (60%) / calibration (20%) / test (20%)
+        # Calibrating on a separate set prevents overfitting the probability estimates
         df_temp = pd.DataFrame({'y': y}, index=X.index)
         date_sorted_idx = X.index.to_series().sort_values().index
         X_sorted = X.loc[date_sorted_idx]
         y_sorted = df_temp.loc[date_sorted_idx, 'y'].values  # Use pandas label indexing
         
-        split_idx = int(0.8 * len(X_sorted))
-        X_train = X_sorted.iloc[:split_idx]
-        X_test = X_sorted.iloc[split_idx:]
-        y_train = y_sorted[:split_idx]
-        y_test = y_sorted[split_idx:]
+        train_end = int(0.60 * len(X_sorted))
+        cal_end = int(0.80 * len(X_sorted))
+        X_train = X_sorted.iloc[:train_end]
+        X_cal = X_sorted.iloc[train_end:cal_end]
+        X_test = X_sorted.iloc[cal_end:]
+        y_train = y_sorted[:train_end]
+        y_cal = y_sorted[train_end:cal_end]
+        y_test = y_sorted[cal_end:]
+        
+        print(f"  Split: Train={len(X_train):,}, Calibration={len(X_cal):,}, Test={len(X_test):,}")
         
         # Feature scaling
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
+        X_cal_scaled = scaler.transform(X_cal)
         X_test_scaled = scaler.transform(X_test)
         
-        # Compute sample weights for class balancing (used by Gradient Boosting)
-        sample_weights = compute_sample_weight('balanced', y_train)
+        # Compute sample weights: class balancing * time-based recency
+        # Recent data is more relevant for prediction (market regimes change)
+        class_weights = compute_sample_weight('balanced', y_train)
+        
+        # Exponential time weights: most recent sample = 1.0, oldest ~ 0.3
+        # decay_rate controls how fast old data loses importance
+        n_train = len(y_train)
+        time_positions = np.arange(n_train) / n_train  # 0 to ~1 (oldest to newest)
+        decay_rate = 1.2  # Higher = more emphasis on recent data
+        time_weights = np.exp(decay_rate * (time_positions - 1))  # Ranges from ~0.3 to 1.0
+        
+        # Combine: class balance * time recency
+        sample_weights = class_weights * time_weights
+        sample_weights = sample_weights / sample_weights.mean()  # Normalize to mean=1
+        
+        print(f"  Time-weighted training: oldest weight={time_weights[0]:.3f}, "
+              f"newest={time_weights[-1]:.3f}, ratio={time_weights[-1]/time_weights[0]:.1f}x")
         
         # Initialize models with better class balancing and calibration
         models = {
@@ -601,16 +773,19 @@ class ModelRetrainer:
         # Train models
         model_results = {}
         trained_models = {}
-        cv_splitter = TimeSeriesSplit(n_splits=5)  # Increased from 3 for more robust validation
+        # Purged CV: 5-sample gap prevents 5-day target leakage between folds
+        cv_splitter = PurgedTimeSeriesSplit(n_splits=5, purge_gap=5)
         
         for model_name, model in models.items():
             print(f"  Training {model_name}...")
             
             try:
-                # Train - use sample weights for Gradient Boosting (no native class_weight)
-                if model_name == 'Gradient Boosting':
+                # Train with time-weighted sample weights for all models
+                # (class balance + recency emphasis)
+                try:
                     model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
-                else:
+                except TypeError:
+                    # Fallback if model doesn't support sample_weight
                     model.fit(X_train_scaled, y_train)
                 
                 # Predict
@@ -650,13 +825,39 @@ class ModelRetrainer:
                              key=lambda k: model_results[k]['f1_score'])
         best_model = trained_models[best_model_name]
         
-        # Calibrate probabilities for the best model (fixes uncalibrated confidence scores)
-        print("[CONFIG] Calibrating model probabilities...")
+        # Calibrate probabilities using dedicated calibration set (NOT test set)
+        # Using isotonic regression which is more flexible than sigmoid (Platt scaling)
+        # and works better when we have enough calibration data (20% of dataset)
+        print("[CONFIG] Calibrating model probabilities on held-out calibration set...")
         try:
             calibrated_model = CalibratedClassifierCV(
-                estimator=best_model, cv='prefit', method='sigmoid'
+                estimator=best_model, cv='prefit', method='isotonic'
             )
-            calibrated_model.fit(X_test_scaled, y_test)
+            calibrated_model.fit(X_cal_scaled, y_cal)
+            
+            # Verify calibration improved: check that high-prob predictions are more accurate
+            cal_probs = calibrated_model.predict_proba(X_test_scaled)
+            cal_preds = calibrated_model.predict(X_test_scaled)
+            cal_accuracy = accuracy_score(y_test, cal_preds)
+            uncal_accuracy = model_results[best_model_name]['accuracy']
+            
+            print(f"  Pre-calibration test accuracy:  {uncal_accuracy:.3f}")
+            print(f"  Post-calibration test accuracy: {cal_accuracy:.3f}")
+            
+            # Check if calibration helps: high-confidence should be more accurate
+            max_probs = cal_probs.max(axis=1)
+            high_mask = max_probs >= 0.65
+            if high_mask.sum() > 10:
+                high_acc = accuracy_score(y_test[high_mask], cal_preds[high_mask])
+                low_acc = accuracy_score(y_test[~high_mask], cal_preds[~high_mask]) if (~high_mask).sum() > 0 else 0
+                print(f"  High-confidence (>=65%) accuracy: {high_acc:.3f} ({high_mask.sum()} samples)")
+                print(f"  Low-confidence (<65%) accuracy:   {low_acc:.3f} ({(~high_mask).sum()} samples)")
+                
+                if high_acc > low_acc:
+                    print("[SUCCESS] Calibration confirmed: high confidence = higher accuracy")
+                else:
+                    print("[WARN] Calibration check: high confidence NOT more accurate - review needed")
+            
             best_model = calibrated_model
             print("[SUCCESS] Probability calibration applied successfully")
         except Exception as e:
@@ -671,6 +872,7 @@ class ModelRetrainer:
             'best_model': best_model,
             'scaler': scaler,
             'X_train': X_train,
+            'X_cal': X_cal,
             'X_test': X_test,
             'y_train': y_train,
             'y_test': y_test,

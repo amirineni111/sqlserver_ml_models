@@ -125,7 +125,7 @@ class ResultsExporter:
             lambda x: 'Oversold' if x < 30 else 'Overbought' if x > 70 else 'Neutral'
         )
         df['signal_strength'] = df.apply(
-            lambda row: 'Strong' if row['confidence'] > 0.8 else 'Moderate' if row['confidence'] > 0.6 else 'Weak',
+            lambda row: 'Strong' if row['confidence'] >= 0.65 else 'Moderate' if row['confidence'] >= 0.55 else 'Weak',
             axis=1
         )
         
@@ -190,7 +190,7 @@ class ResultsExporter:
         # Add analysis columns
         enhanced_df['confidence_percentage'] = (enhanced_df['confidence'] * 100).round(1)
         enhanced_df['signal_strength'] = enhanced_df.apply(
-            lambda row: 'Strong' if row['confidence'] > 0.8 else 'Moderate' if row['confidence'] > 0.6 else 'Weak',
+            lambda row: 'Strong' if row['confidence'] >= 0.65 else 'Moderate' if row['confidence'] >= 0.55 else 'Weak',
             axis=1
         )
         

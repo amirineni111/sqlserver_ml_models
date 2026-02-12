@@ -70,33 +70,45 @@ class TradingSignalPredictor:
         # Database connection
         self.db = SQLServerConnection()
         
-        # Feature columns (must match training - only relative/normalized features)
-        self.feature_columns = [
-            # Technical indicators (Phase 1 + 2)
-            'RSI', 'daily_volatility', 'daily_return',
-            'price_position', 'gap_pct',
-            'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
-            'price_vs_sma20', 'price_vs_sma50', 'price_vs_ema20',
-            'sma20_vs_sma50', 'ema20_vs_ema50', 'sma5_vs_sma20',
-            'volume_sma_ratio',
-            'price_momentum_5', 'price_momentum_10',
-            'price_volatility_10', 'price_volatility_20',
-            'trend_strength_10',
-            'day_of_week', 'month',
-            'bollinger_pctb', 'bollinger_bandwidth',
-            'stochastic_k', 'stochastic_d',
-            'atr_ratio',
-            'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
-            'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
-            'rsi_price_divergence',
-            # Phase 3: Fundamental features
-            'beta', 'forward_pe', 'trailing_pe',
-            'profit_margin', 'revenue_growth', 'earnings_growth',
-            'debt_to_equity', 'return_on_equity', 'current_ratio',
-            'dividend_yield',
-            'price_vs_52wk_high', 'price_vs_52wk_low', 'price_vs_200d_avg',
-            'sector_encoded',
-        ]
+        # Feature columns - loaded dynamically from training or fallback to full list
+        # The retrain script saves the top-N selected features to selected_features.json
+        self.feature_columns = self._load_feature_columns()
+    
+    def _load_feature_columns(self):
+        """Load selected feature columns from training, with fallback to full list."""
+        import json
+        feature_file = 'data/selected_features.json'
+        try:
+            with open(feature_file, 'r') as f:
+                features = json.load(f)
+            safe_print(f"Loaded {len(features)} selected features from {feature_file}")
+            return features
+        except FileNotFoundError:
+            safe_print(f"No {feature_file} found, using legacy full feature list")
+            return [
+                'RSI', 'daily_volatility', 'daily_return',
+                'price_position', 'gap_pct',
+                'rsi_oversold', 'rsi_overbought', 'rsi_momentum',
+                'price_vs_sma20', 'price_vs_sma50', 'price_vs_ema20',
+                'sma20_vs_sma50', 'ema20_vs_ema50', 'sma5_vs_sma20',
+                'volume_sma_ratio',
+                'price_momentum_5', 'price_momentum_10',
+                'price_volatility_10', 'price_volatility_20',
+                'trend_strength_10',
+                'day_of_week', 'month',
+                'bollinger_pctb', 'bollinger_bandwidth',
+                'stochastic_k', 'stochastic_d',
+                'atr_ratio',
+                'macd_normalized', 'macd_signal_normalized', 'macd_histogram_normalized',
+                'return_1d', 'return_2d', 'return_3d', 'return_5d', 'return_10d',
+                'rsi_price_divergence',
+                'beta', 'forward_pe', 'trailing_pe',
+                'profit_margin', 'revenue_growth', 'earnings_growth',
+                'debt_to_equity', 'return_on_equity', 'current_ratio',
+                'dividend_yield',
+                'price_vs_52wk_high', 'price_vs_52wk_low', 'price_vs_200d_avg',
+                'sector_encoded',
+            ]
     
     def load_model_artifacts(self):
         """Load the trained model, scaler, and encoder"""
@@ -385,6 +397,57 @@ class TradingSignalPredictor:
         price_dir_5 = df_copy.groupby('ticker')[price_col].transform(lambda x: np.sign(x.pct_change(5)))
         rsi_dir_5 = df_copy.groupby('ticker')['RSI'].transform(lambda x: np.sign(x.diff(5)))
         df_copy['rsi_price_divergence'] = (price_dir_5 != rsi_dir_5).astype(int)
+        
+        # ================================================================
+        # PHASE 3: Market Regime Detection
+        # ================================================================
+        
+        # --- Regime: SMA Trend Direction (20-day slope normalized) ---
+        sma20 = df_copy.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=20, min_periods=1).mean())
+        df_copy['regime_sma20_slope'] = df_copy.groupby('ticker')[price_col].transform(
+            lambda x: x.rolling(window=20, min_periods=1).mean().pct_change(5) * 100
+        )
+        
+        # --- Regime: ADX-like trend strength (simplified) ---
+        up_move = df_copy.groupby('ticker')[high_col].transform(lambda x: x.diff())
+        down_move = -df_copy.groupby('ticker')[low_col].transform(lambda x: x.diff())
+        pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        df_copy['_pos_dm'] = pos_dm
+        df_copy['_neg_dm'] = neg_dm
+        pos_dm_smooth = df_copy.groupby('ticker')['_pos_dm'].transform(lambda x: x.rolling(14, min_periods=1).mean())
+        neg_dm_smooth = df_copy.groupby('ticker')['_neg_dm'].transform(lambda x: x.rolling(14, min_periods=1).mean())
+        dm_sum = pos_dm_smooth + neg_dm_smooth
+        dx = np.where(dm_sum > 0, np.abs(pos_dm_smooth - neg_dm_smooth) / dm_sum * 100, 0)
+        df_copy['_dx'] = dx
+        df_copy['regime_adx'] = df_copy.groupby('ticker')['_dx'].transform(lambda x: x.rolling(14, min_periods=1).mean())
+        df_copy = df_copy.drop(['_pos_dm', '_neg_dm', '_dx'], axis=1)
+        
+        # --- Regime: Volatility regime (current vol vs long-term vol) ---
+        vol_short = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change().rolling(10, min_periods=1).std())
+        vol_long = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change().rolling(60, min_periods=1).std())
+        df_copy['regime_vol_ratio'] = np.where(vol_long > 0, vol_short / vol_long, 1.0)
+        
+        # --- Regime: Mean reversion indicator (distance from 50-SMA / ATR) ---
+        sma50 = df_copy.groupby('ticker')[price_col].transform(lambda x: x.rolling(window=50, min_periods=1).mean())
+        df_copy['regime_mean_reversion'] = np.where(
+            df_copy['atr_14'] > 0,
+            (df_copy[price_col] - sma50) / df_copy['atr_14'],
+            0
+        )
+        
+        # --- Regime: Trend consistency (% of last 20 days moving in overall direction) ---
+        overall_dir = df_copy.groupby('ticker')[price_col].transform(lambda x: np.sign(x.diff(20)))
+        daily_dirs = df_copy.groupby('ticker')[price_col].transform(lambda x: np.sign(x.diff(1)))
+        consistent = (daily_dirs == overall_dir).astype(float)
+        df_copy['regime_trend_consistency'] = df_copy.groupby('ticker')[price_col].transform(
+            lambda x: pd.Series(index=x.index, dtype=float)
+        )
+        # Calculate trend consistency per ticker
+        consistent_series = consistent.copy()
+        df_copy['regime_trend_consistency'] = consistent_series.groupby(df_copy['ticker']).transform(
+            lambda x: x.rolling(20, min_periods=1).mean()
+        )
         
         return df_copy
     

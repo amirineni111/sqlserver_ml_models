@@ -1,0 +1,22 @@
+[
+  "price_vs_200d_avg",
+  "price_vs_52wk_high",
+  "price_vs_52wk_low",
+  "month",
+  "regime_adx",
+  "regime_mean_reversion",
+  "regime_vol_ratio",
+  "atr_ratio",
+  "price_vs_sma50",
+  "regime_sma20_slope",
+  "sma20_vs_sma50",
+  "profit_margin",
+  "stochastic_k",
+  "price_volatility_20",
+  "price_volatility_10",
+  "ema20_vs_ema50",
+  "bollinger_bandwidth",
+  "macd_histogram_normalized",
+  "daily_volatility",
+  "macd_normalized"
+]
