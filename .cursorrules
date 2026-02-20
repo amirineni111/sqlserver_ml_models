@@ -1,0 +1,34 @@
+# Cursor Rules — sqlserver_copilot
+
+## Project
+NASDAQ ML training pipeline. Gradient Boosting classifier → Buy/Sell predictions for NASDAQ 100 stocks.
+
+## Stack
+- Python 3.11+, scikit-learn, pandas, numpy, pyodbc
+- SQL Server (localhost\MSSQLSERVER01, stockdata_db, Windows Auth)
+
+## Architecture
+- feature_engineering.py → 50+ features from OHLCV data
+- feature_selection.py → SelectKBest top-20
+- train_model.py → Gradient Boosting Classifier training
+- predict_daily.py → Daily predictions → ml_trading_predictions table
+- VARCHAR price columns — ALWAYS CAST to FLOAT
+
+## Output Tables
+- ml_trading_predictions (ticker, date, signal, confidence, strength, RSI, probabilities)
+- ml_prediction_summary (daily aggregates)
+- ml_technical_indicators (indicator snapshots)
+
+## Schedule
+- 6:00 AM daily predictions
+- 6:30 AM freshness check + conditional retrain
+- Weekly full retrain
+
+## Ecosystem
+Part of 7-repo trading platform:
+- stockanalysis — data ingestion
+- sqlserver_copilot_nse — NSE ML
+- sqlserver_copilot_forex — Forex ML
+- sqlserver_mcp — MCP bridge
+- stockdata_agenticai — CrewAI agents (consumer)
+- streamlit-trading-dashboard — visualization (consumer)

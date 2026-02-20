@@ -1,19 +1,37 @@
-# Copilot Instructions for SQL Server ML Project
-
-<!-- Use this file to provide workspace-specific custom instructions to Copilot. For more details, visit https://code.visualstudio.com/docs/copilot/copilot-customization#_use-a-githubcopilotinstructionsmd-file -->
+# Copilot Instructions — sqlserver_copilot
 
 ## Project Context
-This is a Python-based machine learning project that connects to SQL Server databases for data analysis and model development.
+This is the **NASDAQ ML training pipeline** — part of a 7-repo stock trading analytics platform. Trains a Gradient Boosting classifier to predict Buy/Sell signals for NASDAQ 100 stocks.
+
+## Key Architecture Rules
+- Reads from `nasdaq_100_hist_data` (VARCHAR prices — always CAST to FLOAT)
+- Writes to `ml_trading_predictions`, `ml_prediction_summary`, `ml_technical_indicators`
+- Uses scikit-learn Gradient Boosting with 50+ engineered features → top 20 selected
+- Connected to shared database `stockdata_db` on `localhost\MSSQLSERVER01` (Windows Auth)
 
 ## Key Technologies
-- **Database**: Microsoft SQL Server
-- **Language**: Python 3.x
+- **Database**: SQL Server (`stockdata_db` on `localhost\MSSQLSERVER01`, Windows Auth)
+- **Language**: Python 3.11+
 - **ML Libraries**: scikit-learn, pandas, numpy, matplotlib, seaborn
-- **Database Connectivity**: pyodbc, SQLAlchemy
-- **Development Environment**: Jupyter notebooks for interactive analysis
+- **Database Connectivity**: pyodbc (Trusted_Connection=yes)
+
+## Pipeline Flow
+1. `feature_engineering.py` — Calculates 50+ technical features from OHLCV
+2. `feature_selection.py` — SelectKBest picks top 20 features
+3. `train_model.py` — Trains and saves Gradient Boosting model
+4. `predict_daily.py` — Daily predictions written to SQL Server
+
+## Schedule
+- Daily 6:00 AM: Prediction run
+- Daily 6:30 AM: Data freshness check (conditional retrain)
+- Weekly: Full retrain with updated data
+
+## Database Notes
+- Price columns in `nasdaq_100_hist_data` are **VARCHAR** — always use `CAST(close_price AS FLOAT)`
+- Server: `localhost\MSSQLSERVER01`, DB: `stockdata_db`, Auth: Windows Integrated
 
 ## Code Guidelines
-- Use pyodbc or SQLAlchemy for database connections
+- Use pyodbc for database connections (Windows Integrated Auth)
 - Follow PEP 8 Python style guidelines
 - Use type hints where appropriate
 - Include proper error handling for database operations
@@ -23,12 +41,12 @@ This is a Python-based machine learning project that connects to SQL Server data
 ## Security Considerations
 - Never hardcode database credentials
 - Use environment variables or secure configuration files
-- Implement proper connection pooling
 - Use parameterized queries to prevent SQL injection
 
-## ML Model Development
-- Start with exploratory data analysis (EDA)
-- Use appropriate data preprocessing techniques
-- Implement proper train/validation/test splits
-- Focus on feature engineering from SQL data
-- Include model evaluation metrics and visualization
+## Sibling Repositories (same database)
+- `sqlserver_copilot_nse` — NSE ML pipeline (5-model ensemble)
+- `sqlserver_copilot_forex` — Forex ML pipeline (XGBoost/LightGBM)
+- `stockdata_agenticai` — CrewAI agents that consume predictions
+- `streamlit-trading-dashboard` — Displays predictions and tracks accuracy
+- `sqlserver_mcp` — .NET MCP bridge for SQL Server
+- `stockanalysis` — Data ingestion ETL

@@ -175,6 +175,8 @@ class TradingSignalPredictor:
             
             # Merge fundamentals & sector data (separate queries for speed)
             df = self._merge_fundamentals(df)
+            # Merge market context (VIX, indices, sector ETFs, treasury)
+            df = self._merge_market_context(df)
             return df
         except Exception as e:
             safe_print(f"❌ Error fetching data: {e}")
@@ -209,6 +211,34 @@ class TradingSignalPredictor:
                 df = df.merge(df_sector, on='ticker', how='left')
         except Exception as e:
             print(f"[WARN] Could not load sector data: {e}")
+        
+        return df
+    
+    def _merge_market_context(self, df):
+        """Load market context data (VIX, indices, sector ETFs, treasury) and merge on trading_date."""
+        try:
+            context_query = """
+            SELECT trading_date,
+                   vix_close, vix_change_pct,
+                   sp500_close, sp500_return_1d,
+                   nasdaq_comp_close, nasdaq_comp_return_1d,
+                   dxy_close, dxy_return_1d,
+                   us_10y_yield_close, us_10y_yield_change,
+                   xlk_return_1d, xlf_return_1d, xle_return_1d,
+                   xlv_return_1d, xli_return_1d, xlc_return_1d,
+                   xly_return_1d, xlp_return_1d, xlb_return_1d,
+                   xlre_return_1d, xlu_return_1d
+            FROM dbo.market_context_daily
+            ORDER BY trading_date
+            """
+            df_context = self.db.execute_query(context_query)
+            
+            if not df_context.empty:
+                df['trading_date'] = pd.to_datetime(df['trading_date'])
+                df_context['trading_date'] = pd.to_datetime(df_context['trading_date'])
+                df = df.merge(df_context, on='trading_date', how='left')
+        except Exception as e:
+            print(f"[WARN] Could not load market context: {e}")
         
         return df
     
@@ -283,6 +313,29 @@ class TradingSignalPredictor:
             df_features['sector_encoded'] = self.sector_encoder.transform(sector_values)
         else:
             df_features['sector_encoded'] = 0
+        
+        # Phase 4: Market context — sector-specific ETF return mapping
+        SECTOR_TO_ETF = {
+            'Technology': 'xlk_return_1d',
+            'Financial Services': 'xlf_return_1d',
+            'Energy': 'xle_return_1d',
+            'Healthcare': 'xlv_return_1d',
+            'Industrials': 'xli_return_1d',
+            'Communication Services': 'xlc_return_1d',
+            'Consumer Cyclical': 'xly_return_1d',
+            'Consumer Defensive': 'xlp_return_1d',
+            'Basic Materials': 'xlb_return_1d',
+            'Real Estate': 'xlre_return_1d',
+            'Utilities': 'xlu_return_1d',
+        }
+        if 'sector' in df_features.columns and 'xlk_return_1d' in df_features.columns:
+            df_features['sector_etf_return_1d'] = df_features['sector'].map(
+                lambda s: SECTOR_TO_ETF.get(s, 'sp500_return_1d')
+            )
+            df_features['sector_etf_return_1d'] = df_features.apply(
+                lambda row: row.get(row['sector_etf_return_1d'], 0) if pd.notna(row.get('sector_etf_return_1d')) else 0,
+                axis=1
+            )
         
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
         df_features = df_features.fillna(method='ffill').fillna(0)
