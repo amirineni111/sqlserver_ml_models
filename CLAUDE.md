@@ -13,7 +13,7 @@ This is the **NASDAQ ML training pipeline** — one of **7 interconnected reposi
 | Layer | Repo | Purpose |
 |-------|------|---------|
 | Data Ingestion | `stockanalysis` | ETL: yfinance/Alpha Vantage → SQL Server |
-| SQL Infrastructure | `sqlserver_mcp` | .NET 8 MCP Server + stored procs/views |
+| SQL Infrastructure | `sqlserver_mcp` | .NET 8 MCP Server (Microsoft MssqlMcp) — 7 tools (ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData) via stdio transport for AI IDE ↔ SQL Server |
 | Dashboard | `streamlit-trading-dashboard` | 40+ views, signal tracking, Streamlit UI |
 | **ML: NASDAQ** ⭐ | **`sqlserver_copilot`** | **THIS REPO** — Gradient Boosting → `ml_trading_predictions` |
 | ML: NSE | `sqlserver_copilot_nse` | 5-model ensemble → `ml_nse_trading_predictions` |
@@ -172,3 +172,24 @@ python src/predict_daily.py --test  # Test prediction without writing
   - Strategy Trade queries (NASDAQ ML signals)
   - Cross-Strategy queries (NASDAQ alignment analysis)
 - `streamlit-trading-dashboard` reads for display
+
+---
+
+## 7. MCP SERVER FOR DEVELOPMENT
+
+The `sqlserver_mcp` repo provides an MCP server for AI IDEs to query `stockdata_db` directly during development.
+
+### VS Code Configuration
+```json
+"MSSQL MCP": {
+    "type": "stdio",
+    "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
+    "env": {
+        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+    }
+}
+```
+
+### 7 MCP Tools: ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData
+
+Useful for: checking `ml_trading_predictions` output format, verifying `nasdaq_100_hist_data` schema, exploring prediction accuracy data.

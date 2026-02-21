@@ -29,6 +29,17 @@ Part of 7-repo trading platform:
 - stockanalysis — data ingestion
 - sqlserver_copilot_nse — NSE ML
 - sqlserver_copilot_forex — Forex ML
-- sqlserver_mcp — MCP bridge
+- sqlserver_mcp — .NET 8 MCP Server (Microsoft MssqlMcp): 7 tools (ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData) via stdio. Use to explore DB schemas/data during development.
 - stockdata_agenticai — CrewAI agents (consumer)
 - streamlit-trading-dashboard — visualization (consumer)
+
+## MCP Server Config (for AI IDE DB access)
+```json
+"MSSQL MCP": {
+    "type": "stdio",
+    "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
+    "env": {
+        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+    }
+}
+```

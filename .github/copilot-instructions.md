@@ -48,5 +48,18 @@ This is the **NASDAQ ML training pipeline** — part of a 7-repo stock trading a
 - `sqlserver_copilot_forex` — Forex ML pipeline (XGBoost/LightGBM)
 - `stockdata_agenticai` — CrewAI agents that consume predictions
 - `streamlit-trading-dashboard` — Displays predictions and tracks accuracy
-- `sqlserver_mcp` — .NET MCP bridge for SQL Server
+- `sqlserver_mcp` — .NET 8 MCP Server (Microsoft MssqlMcp) with 7 tools: ListTables, DescribeTable, ReadData, CreateTable, DropTable, InsertData, UpdateData. Stdio transport. Use to explore DB schemas and verify query results during development.
 - `stockanalysis` — Data ingestion ETL
+
+## MCP Server for Development
+Configure in `.vscode/mcp.json` to query stockdata_db directly from your AI IDE:
+```json
+"MSSQL MCP": {
+    "type": "stdio",
+    "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
+    "env": {
+        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+    }
+}
+```
+Useful for: verifying `ml_trading_predictions` output, checking `nasdaq_100_hist_data` schema, exploring prediction accuracy.
