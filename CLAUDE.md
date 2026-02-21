@@ -110,9 +110,9 @@ Merged from shared `market_context_daily` table on `trading_date` via `_merge_ma
 ## 4. DATABASE CONTEXT
 
 ### Shared SQL Server
-- **Server**: `localhost\MSSQLSERVER01`
+- **Server**: `192.168.87.27\MSSQLSERVER01` (Machine A LAN IP)
 - **Database**: `stockdata_db`
-- **Auth**: Windows Integrated (`Trusted_Connection=yes`)
+- **Auth**: SQL Auth (`remote_user`, `SQL_TRUSTED_CONNECTION=no`)
 
 ### Tables This Repo READS
 | Table | Purpose |
@@ -185,7 +185,7 @@ The `sqlserver_mcp` repo provides an MCP server for AI IDEs to query `stockdata_
     "type": "stdio",
     "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
     "env": {
-        "CONNECTION_STRING": "Server=localhost\\MSSQLSERVER01;Database=stockdata_db;Trusted_Connection=True;TrustServerCertificate=True"
+        "CONNECTION_STRING": "Server=192.168.87.27\\MSSQLSERVER01;Database=stockdata_db;User Id=remote_user;Password=YourStrongPassword123!;TrustServerCertificate=True"
     }
 }
 ```

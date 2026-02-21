@@ -161,7 +161,7 @@ if data_age_days == 0:
 Create a `.env` file for configuration:
 ```env
 # Database configuration
-DB_SERVER=localhost\MSSQLSERVER01
+DB_SERVER=192.168.87.27\MSSQLSERVER01
 DB_DATABASE=stockdata_db
 DB_TIMEOUT=30
 
