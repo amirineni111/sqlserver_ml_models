@@ -177,6 +177,8 @@ class TradingSignalPredictor:
             df = self._merge_fundamentals(df)
             # Merge market context (VIX, indices, sector ETFs, treasury)
             df = self._merge_market_context(df)
+            # Merge calendar features (holidays, short weeks, expiry)
+            df = self._merge_calendar_features(df, market='NASDAQ')
             return df
         except Exception as e:
             safe_print(f"❌ Error fetching data: {e}")
@@ -239,6 +241,35 @@ class TradingSignalPredictor:
                 df = df.merge(df_context, on='trading_date', how='left')
         except Exception as e:
             print(f"[WARN] Could not load market context: {e}")
+        
+        return df
+    
+    def _merge_calendar_features(self, df, market='NASDAQ'):
+        """Load calendar features (holidays, short weeks, expiry) and merge on trading_date.
+        
+        Adds pre/post holiday flags, short week indicators, options expiry,
+        and cross-market holiday awareness from the shared market_calendar table.
+        """
+        try:
+            cal_query = f"""
+            SELECT calendar_date,
+                   is_pre_holiday, is_post_holiday, is_short_week,
+                   trading_days_in_week, is_month_end, is_month_start,
+                   is_quarter_end, is_options_expiry,
+                   days_until_next_holiday, days_since_last_holiday,
+                   other_market_closed
+            FROM dbo.vw_market_calendar_features
+            WHERE market = '{market}'
+            """
+            df_cal = self.db.execute_query(cal_query)
+            
+            if not df_cal.empty:
+                df['trading_date'] = pd.to_datetime(df['trading_date'])
+                df_cal['calendar_date'] = pd.to_datetime(df_cal['calendar_date'])
+                df = df.merge(df_cal, left_on='trading_date', right_on='calendar_date', how='left')
+                df = df.drop(columns=['calendar_date'], errors='ignore')
+        except Exception as e:
+            print(f"[WARN] Could not load calendar features: {e}")
         
         return df
     

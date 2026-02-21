@@ -207,6 +207,9 @@ class ModelRetrainer:
             # Load market context (VIX, indices, sector ETFs, treasury) and merge
             df = self._merge_market_context(df)
             
+            # Load calendar features (holidays, short weeks, expiry) and merge
+            df = self._merge_calendar_features(df, market='NASDAQ')
+            
             return df
             
         except Exception as e:
@@ -292,6 +295,42 @@ class ModelRetrainer:
                 print("  [WARN] No market context data found — run get_market_context_daily.py --backfill")
         except Exception as e:
             print(f"  [WARN] Could not load market context: {e}")
+        
+        return df
+    
+    def _merge_calendar_features(self, df, market='NASDAQ'):
+        """Load calendar features (holidays, short weeks, expiry) and merge on trading_date.
+        
+        Adds pre/post holiday flags, short week indicators, options expiry,
+        and cross-market holiday awareness from the shared market_calendar table.
+        Each row broadcasts to all tickers for the same date (market-wide features).
+        """
+        print("[DATA] Loading market calendar features...")
+        
+        try:
+            cal_query = f"""
+            SELECT calendar_date,
+                   is_pre_holiday, is_post_holiday, is_short_week,
+                   trading_days_in_week, is_month_end, is_month_start,
+                   is_quarter_end, is_options_expiry,
+                   days_until_next_holiday, days_since_last_holiday,
+                   other_market_closed
+            FROM dbo.vw_market_calendar_features
+            WHERE market = '{market}'
+            """
+            df_cal = self.db.execute_query(cal_query)
+            
+            if not df_cal.empty:
+                df['trading_date'] = pd.to_datetime(df['trading_date'])
+                df_cal['calendar_date'] = pd.to_datetime(df_cal['calendar_date'])
+                df = df.merge(df_cal, left_on='trading_date', right_on='calendar_date', how='left')
+                df = df.drop(columns=['calendar_date'], errors='ignore')
+                matched = df['is_pre_holiday'].notna().sum()
+                print(f"  Calendar features merged: {len(df_cal)} dates, {matched} matched rows")
+            else:
+                print("  [WARN] No calendar data found — run sql/create_market_calendar.sql")
+        except Exception as e:
+            print(f"  [WARN] Could not load calendar features: {e}")
         
         return df
     
@@ -707,6 +746,12 @@ class ModelRetrainer:
             'sp500_return_1d', 'nasdaq_comp_return_1d',
             'dxy_return_1d', 'us_10y_yield_close', 'us_10y_yield_change',
             'sector_etf_return_1d',  # Mapped from sector → ETF (computed below)
+            # Phase 5: Calendar features (from market_calendar)
+            'is_pre_holiday', 'is_post_holiday', 'is_short_week',
+            'trading_days_in_week', 'is_month_end', 'is_month_start',
+            'is_quarter_end', 'is_options_expiry',
+            'days_until_next_holiday', 'days_since_last_holiday',
+            'other_market_closed',
         ]
         # Filter to only features that exist in the DataFrame
         feature_cols = [col for col in feature_cols if col in df_features.columns]
