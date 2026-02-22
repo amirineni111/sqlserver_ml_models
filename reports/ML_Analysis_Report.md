@@ -2,7 +2,7 @@
 
 **Generated:** November 25, 2025  
 **Project:** NASDAQ 100 RSI Trading Signal Prediction  
-**Database:** SQL Server (localhost\MSSQLSERVER01, stockdata_db)
+**Database:** SQL Server (192.168.86.55\MSSQLSERVER01, stockdata_db)
 
 ## Executive Summary
 

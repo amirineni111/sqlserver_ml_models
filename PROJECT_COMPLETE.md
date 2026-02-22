@@ -9,7 +9,7 @@
 ## 🏆 What We Accomplished
 
 ### 1. **Complete ML Pipeline Development**
-- ✅ Database connection to SQL Server (`localhost\MSSQLSERVER01`)
+- ✅ Database connection to SQL Server (`192.168.86.55\MSSQLSERVER01`)
 - ✅ Data exploration and analysis (41,346 NASDAQ 100 records)
 - ✅ Feature engineering (18 technical indicators)
 - ✅ Model training and comparison (4 ML algorithms)
@@ -17,7 +17,7 @@
 - ✅ Production deployment script
 
 ### 2. **Database Integration**
-- **Server:** SQL Server `localhost\MSSQLSERVER01`
+- **Server:** SQL Server `192.168.86.55\MSSQLSERVER01`
 - **Database:** `stockdata_db`
 - **Tables:** NASDAQ 100 historical data + RSI signals
 - **Connection:** Windows Authentication via SQLAlchemy/pyodbc

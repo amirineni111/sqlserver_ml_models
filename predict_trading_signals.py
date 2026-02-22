@@ -56,22 +56,17 @@ class TradingSignalPredictor:
     """Production trading signal prediction system"""
     
     def __init__(self, model_path=None, scaler_path=None, encoder_path=None, sector_encoder_path=None):
-        """Initialize the predictor with saved model artifacts"""
-        
-        # Default paths (updated for improved model with new features)
+        """Initialize the predictor with saved model artifacts (ensemble, 5-day direction)"""
+        # Default paths (updated for ensemble model)
         self.model_path = model_path or 'data/best_model_gradient_boosting.joblib'
         self.scaler_path = scaler_path or 'data/scaler.joblib'
         self.encoder_path = encoder_path or 'data/target_encoder.joblib'
         self.sector_encoder_path = sector_encoder_path or 'data/sector_encoder.joblib'
-        
         # Load model artifacts
         self.load_model_artifacts()
-        
         # Database connection
         self.db = SQLServerConnection()
-        
         # Feature columns - loaded dynamically from training or fallback to full list
-        # The retrain script saves the top-N selected features to selected_features.json
         self.feature_columns = self._load_feature_columns()
     
     def _load_feature_columns(self):
@@ -111,25 +106,22 @@ class TradingSignalPredictor:
             ]
     
     def load_model_artifacts(self):
-        """Load the trained model, scaler, and encoder"""
+        """Load the trained ensemble model, scaler, and encoder (5-day direction)"""
         try:
             self.model = joblib.load(self.model_path)
             self.scaler = joblib.load(self.scaler_path)
             self.target_encoder = joblib.load(self.encoder_path)
-            safe_print("✅ Model artifacts loaded successfully")
-            
+            safe_print("✅ Model artifacts loaded successfully (ensemble, 5-day direction)")
             # Get class names
             self.class_names = self.target_encoder.classes_
             safe_print(f"📊 Target classes: {list(self.class_names)}")
-            
-            # Load sector encoder (optional - may not exist for older models)
+            # Load sector encoder (optional)
             try:
                 self.sector_encoder = joblib.load(self.sector_encoder_path)
                 safe_print(f"📊 Sector encoder loaded: {len(self.sector_encoder.classes_)} sectors")
             except FileNotFoundError:
                 self.sector_encoder = None
                 print("[INFO] No sector encoder found - sector features will default to 0")
-            
         except FileNotFoundError as e:
             safe_print(f"❌ Error loading model artifacts: {e}")
             print("Please ensure the model has been trained and saved.")
@@ -536,18 +528,15 @@ class TradingSignalPredictor:
         return df_copy
     
     def predict_signals(self, ticker=None, date=None, confidence_threshold=0.7):
-        """Make trading signal predictions"""
-        
+        """Make trading signal predictions (ensemble, 5-day direction)"""
         # Get data (80 days lookback for technical indicator warm-up)
         df = self.get_latest_data(ticker, days_back=80)
         if df is None:
             return None
-        
         # Engineer features
         df_features = self.engineer_features(df)
         if df_features is None:
             return None
-        
         # Filter by date if specified
         if date:
             target_date = pd.to_datetime(date)
@@ -555,87 +544,81 @@ class TradingSignalPredictor:
             if df_features.empty:
                 safe_print(f"⚠️  No data found for date: {date}")
                 return None
-        
         # Get latest data for each ticker
         latest_data = df_features.groupby('ticker').tail(1).copy()
-        
         if latest_data.empty:
             safe_print("⚠️  No data available for prediction")
             return None
-        
         # Prepare features
         X = latest_data[self.feature_columns].copy()
-        
         # Scale features
         X_scaled = self.scaler.transform(X)
-        
         # Make predictions
         predictions = self.model.predict(X_scaled)
         probabilities = self.model.predict_proba(X_scaled)
-        
         # Create results DataFrame
         results = latest_data[['trading_date', 'ticker', 'company', 'close_price', 'RSI']].copy()
         results['predicted_signal'] = self.target_encoder.inverse_transform(predictions)
         results['confidence'] = probabilities.max(axis=1)
-        results['sell_probability'] = probabilities[:, 0]  # Overbought (Sell)
-        results['buy_probability'] = probabilities[:, 1]   # Oversold (Buy)
-        
+        # Up/Down probabilities (class order from encoder)
+        up_idx = np.where(self.target_encoder.classes_ == 'Up')[0]
+        down_idx = np.where(self.target_encoder.classes_ == 'Down')[0]
+        if len(up_idx) == 1 and len(down_idx) == 1:
+            results['up_probability'] = probabilities[:, up_idx[0]]
+            results['down_probability'] = probabilities[:, down_idx[0]]
+        else:
+            results['up_probability'] = np.nan
+            results['down_probability'] = np.nan
         # Add confidence flag
         results['high_confidence'] = results['confidence'] > confidence_threshold
-        
         return results
     
     def format_prediction_output(self, results, show_all=False):
-        """Format prediction results for display"""
+        """Format prediction results for display (Up/Down signals)"""
         if results is None or results.empty:
             return "No predictions available"
-        
         output = []
         output.append("=" * 80)
         output.append(f"[TARGET] TRADING SIGNAL PREDICTIONS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         output.append("=" * 80)
-        
         # Filter high confidence predictions
         high_conf = results[results['high_confidence']]
         medium_conf = results[(results['confidence'] > 0.6) & (results['confidence'] <= 0.7)]
         low_conf = results[results['confidence'] <= 0.6]
-        
         # High confidence predictions
         if not high_conf.empty:
-            output.append("\n[BUY] HIGH CONFIDENCE PREDICTIONS (>70%)")
+            output.append("\n[UP] HIGH CONFIDENCE PREDICTIONS (>70%)")
             output.append("-" * 50)
             for _, row in high_conf.iterrows():
-                signal_emoji = "[SELL]" if "Sell" in row['predicted_signal'] else "[BUY]"
+                signal_emoji = "[UP]" if row['predicted_signal'] == 'Up' else "[DOWN]"
                 output.append(f"{signal_emoji} {row['ticker']} ({row['company'][:20]})")
                 output.append(f"   Signal: {row['predicted_signal']}")
                 output.append(f"   Confidence: {row['confidence']:.1%}")
+                output.append(f"   Up Prob: {row.get('up_probability', np.nan):.1%}")
+                output.append(f"   Down Prob: {row.get('down_probability', np.nan):.1%}")
                 output.append(f"   Close: ${row['close_price']:.2f}")
                 output.append(f"   RSI: {row['RSI']:.1f}")
                 output.append(f"   Date: {row['trading_date'].strftime('%Y-%m-%d')}")
                 output.append("")
-        
         # Medium confidence predictions
         if not medium_conf.empty and show_all:
             output.append("\n[MEDIUM] MEDIUM CONFIDENCE PREDICTIONS (60-70%)")
             output.append("-" * 50)
             for _, row in medium_conf.iterrows():
-                signal_emoji = "[SELL]" if "Sell" in row['predicted_signal'] else "[BUY]"
+                signal_emoji = "[UP]" if row['predicted_signal'] == 'Up' else "[DOWN]"
                 output.append(f"{signal_emoji} {row['ticker']}: {row['predicted_signal']} ({row['confidence']:.1%})")
-        
         # Summary statistics
         total_predictions = len(results)
         high_conf_count = len(high_conf)
-        buy_signals = len(results[results['predicted_signal'].str.contains('Buy')])
-        sell_signals = len(results[results['predicted_signal'].str.contains('Sell')])
-        
+        up_signals = len(results[results['predicted_signal'] == 'Up'])
+        down_signals = len(results[results['predicted_signal'] == 'Down'])
         output.append("\n[DATA] PREDICTION SUMMARY")
         output.append("-" * 30)
         output.append(f"Total Predictions: {total_predictions}")
         output.append(f"High Confidence: {high_conf_count} ({high_conf_count/total_predictions:.1%})")
-        output.append(f"Buy Signals: {buy_signals}")
-        output.append(f"Sell Signals: {sell_signals}")
+        output.append(f"Up Signals: {up_signals}")
+        output.append(f"Down Signals: {down_signals}")
         output.append(f"Average Confidence: {results['confidence'].mean():.1%}")
-        
         return "\n".join(output)
 
 def main():

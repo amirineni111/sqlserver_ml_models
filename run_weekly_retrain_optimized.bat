@@ -12,6 +12,14 @@ echo.
 REM Change to the script directory
 cd /d "%~dp0"
 
+REM Activate the virtual environment
+if exist ".venv\Scripts\activate.bat" (
+    echo [INFO] Activating virtual environment...
+    call .venv\Scripts\activate.bat
+) else (
+    echo [WARNING] Virtual environment not found at .venv, using system Python
+)
+
 REM Set the Python executable
 set PYTHON_EXE=python
 
@@ -64,3 +72,6 @@ echo Completion Time: %date% %time%
 echo Model backups saved to: data\backups\
 echo ========================================
 echo.
+
+REM Explicitly exit with success code for Task Scheduler
+exit /b 0

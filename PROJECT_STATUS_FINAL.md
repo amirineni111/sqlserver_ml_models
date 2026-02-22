@@ -16,7 +16,7 @@ Your **SQL Server ML Trading Signals Daily Automation System** has been **succes
 - **`DAILY_AUTOMATION_GUIDE.md`** - Comprehensive setup and scheduling guide ✅
 
 ### 📊 Current System Capabilities
-- **Database Connection**: ✅ Successfully connects to SQL Server (`localhost\MSSQLSERVER01`)
+- **Database Connection**: ✅ Successfully connects to SQL Server (`192.168.86.55\MSSQLSERVER01`)
 - **Data Status Monitoring**: ✅ Tracks 41,152 NASDAQ 100 records (latest: 2025-11-24)
 - **Smart Retraining Logic**: ✅ Only retrains when data is fresh (≤2 days old)
 - **Comprehensive Logging**: ✅ Detailed logs in `logs/` folder with timestamps
