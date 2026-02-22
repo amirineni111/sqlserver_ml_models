@@ -266,6 +266,18 @@ class DatabaseExporter:
         )
         
         # Select columns for database
+        # Model outputs Up/Down signals + up_probability/down_probability
+        # Map to DB schema (Buy/Sell + buy_probability/sell_probability) for backward compatibility
+        signal_map = {'Up': 'Buy', 'Down': 'Sell'}
+        if 'predicted_signal' in df.columns:
+            df['predicted_signal'] = df['predicted_signal'].map(signal_map).fillna(df['predicted_signal'])
+        
+        # Map probability columns to DB column names
+        if 'up_probability' in df.columns:
+            df['buy_probability'] = df['up_probability']
+        if 'down_probability' in df.columns:
+            df['sell_probability'] = df['down_probability']
+        
         columns = [
             'run_timestamp', 'trading_date', 'ticker', 'company',
             'predicted_signal', 'confidence', 'confidence_percentage', 'signal_strength',
@@ -341,8 +353,8 @@ class DatabaseExporter:
             'total_predictions': len(predictions_df),
             'high_confidence_count': len(predictions_df[predictions_df['confidence'] > 0.7]),
             'medium_confidence_count': len(predictions_df[(predictions_df['confidence'] > 0.6) & (predictions_df['confidence'] <= 0.7)]),
-            'buy_signals': len(predictions_df[predictions_df['predicted_signal'].str.contains('Buy', na=False)]),
-            'sell_signals': len(predictions_df[predictions_df['predicted_signal'].str.contains('Sell', na=False)]),
+            'buy_signals': len(predictions_df[predictions_df['predicted_signal'].str.contains('Buy|Up', na=False)]),
+            'sell_signals': len(predictions_df[predictions_df['predicted_signal'].str.contains('Sell|Down', na=False)]),
             'avg_confidence': predictions_df['confidence'].mean(),
             'avg_rsi': predictions_df['RSI'].mean() if 'RSI' in predictions_df.columns else None
         }

@@ -167,6 +167,8 @@ class TradingSignalPredictor:
             
             # Merge fundamentals & sector data (separate queries for speed)
             df = self._merge_fundamentals(df)
+            # Merge enriched DB views (SMA signals, MACD signals, S/R, Fibonacci, Patterns, Stochastic)
+            df = self._merge_enriched_db_features(df, days_back)
             # Merge market context (VIX, indices, sector ETFs, treasury)
             df = self._merge_market_context(df)
             # Merge calendar features (holidays, short weeks, expiry)
@@ -205,6 +207,123 @@ class TradingSignalPredictor:
                 df = df.merge(df_sector, on='ticker', how='left')
         except Exception as e:
             print(f"[WARN] Could not load sector data: {e}")
+        
+        return df
+    
+    def _merge_enriched_db_features(self, df, days_back=80):
+        """Load enriched features from DB views (SMA signals, MACD signals, S/R, Fibonacci, Patterns, Stochastic)"""
+        df['trading_date'] = pd.to_datetime(df['trading_date'])
+        
+        # SMA Signals
+        try:
+            sma_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(SMA_200 AS FLOAT) as sma_200,
+                   CAST(SMA_100 AS FLOAT) as sma_100,
+                   SMA_200_Flag, SMA_100_Flag, SMA_50_Flag, SMA_20_Flag
+            FROM dbo.nasdaq_100_sma_signals
+            WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_sma = self.db.execute_query(sma_query)
+            if not df_sma.empty:
+                df_sma['trading_date'] = pd.to_datetime(df_sma['trading_date'])
+                df_sma = df_sma.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_sma, on=['ticker', 'trading_date'], how='left')
+        except Exception as e:
+            print(f"[WARN] SMA Signals load failed: {e}")
+        
+        # MACD Signals (crossover)
+        try:
+            macd_sig_query = f"""
+            SELECT ticker, trading_date,
+                   MACD_Signal as macd_crossover_signal
+            FROM dbo.nasdaq_100_macd_signals
+            WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_macd_sig = self.db.execute_query(macd_sig_query)
+            if not df_macd_sig.empty:
+                df_macd_sig['trading_date'] = pd.to_datetime(df_macd_sig['trading_date'])
+                df_macd_sig = df_macd_sig.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_macd_sig, on=['ticker', 'trading_date'], how='left')
+        except Exception as e:
+            print(f"[WARN] MACD Signals load failed: {e}")
+        
+        # Stochastic
+        try:
+            stoch_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(stoch_14d_k AS FLOAT) as db_stoch_k,
+                   CAST(stoch_14d_d AS FLOAT) as db_stoch_d,
+                   CAST(momentum_strength AS FLOAT) as db_stoch_momentum
+            FROM dbo.nasdaq_100_stochastic
+            WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_stoch = self.db.execute_query(stoch_query)
+            if not df_stoch.empty:
+                df_stoch['trading_date'] = pd.to_datetime(df_stoch['trading_date'])
+                df_stoch = df_stoch.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_stoch, on=['ticker', 'trading_date'], how='left')
+        except Exception as e:
+            print(f"[WARN] Stochastic load failed: {e}")
+        
+        # Fibonacci
+        try:
+            fib_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(distance_to_nearest_fib_pct AS FLOAT) as fib_distance_pct,
+                   fib_trade_signal
+            FROM dbo.nasdaq_100_fibonacci
+            WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_fib = self.db.execute_query(fib_query)
+            if not df_fib.empty:
+                df_fib['trading_date'] = pd.to_datetime(df_fib['trading_date'])
+                df_fib = df_fib.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_fib, on=['ticker', 'trading_date'], how='left')
+        except Exception as e:
+            print(f"[WARN] Fibonacci load failed: {e}")
+        
+        # Support/Resistance
+        try:
+            sr_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(distance_to_s1_pct AS FLOAT) as sr_distance_to_support_pct,
+                   CAST(distance_to_r1_pct AS FLOAT) as sr_distance_to_resistance_pct,
+                   pivot_status,
+                   sr_trade_signal
+            FROM dbo.nasdaq_100_support_resistance
+            WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_sr = self.db.execute_query(sr_query)
+            if not df_sr.empty:
+                df_sr['trading_date'] = pd.to_datetime(df_sr['trading_date'])
+                df_sr = df_sr.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_sr, on=['ticker', 'trading_date'], how='left')
+        except Exception as e:
+            print(f"[WARN] Support/Resistance load failed: {e}")
+        
+        # Candlestick Patterns
+        try:
+            pattern_query = f"""
+            SELECT ticker, trading_date,
+                   pattern_signal,
+                   CASE WHEN doji IS NOT NULL THEN 1 ELSE 0 END as has_doji,
+                   CASE WHEN hammer IS NOT NULL THEN 1 ELSE 0 END as has_hammer,
+                   CASE WHEN shooting_star IS NOT NULL THEN 1 ELSE 0 END as has_shooting_star,
+                   CASE WHEN bullish_engulfing IS NOT NULL THEN 1 ELSE 0 END as has_bullish_engulfing,
+                   CASE WHEN bearish_engulfing IS NOT NULL THEN 1 ELSE 0 END as has_bearish_engulfing,
+                   CASE WHEN morning_star IS NOT NULL THEN 1 ELSE 0 END as has_morning_star,
+                   CASE WHEN evening_star IS NOT NULL THEN 1 ELSE 0 END as has_evening_star
+            FROM dbo.nasdaq_100_patterns
+            WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_pat = self.db.execute_query(pattern_query)
+            if not df_pat.empty:
+                df_pat['trading_date'] = pd.to_datetime(df_pat['trading_date'])
+                df_pat = df_pat.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_pat, on=['ticker', 'trading_date'], how='left')
+        except Exception as e:
+            print(f"[WARN] Patterns load failed: {e}")
         
         return df
     
@@ -297,6 +416,79 @@ class TradingSignalPredictor:
         
         # Enhanced technical indicators (proven to improve model accuracy)
         df_features = self.add_enhanced_features(df_features)
+        
+        # ================================================================
+        # ENRICHED DB FEATURE ENCODING (must match training pipeline)
+        # ================================================================
+        signal_strength_map = {
+            'STRONG_BUY': 2, 'BUY': 1, 'BUY_FIB_500': 1, 'BUY_FIB_382': 1,
+            'BUY_FIB_236': 1, 'BUY_BULLISH_CROSS': 1,
+            'NEUTRAL': 0, 'NEUTRAL_WAIT': 0, 'No Signal': 0,
+            'SELL': -1, 'SELL_BEARISH_CROSS': -1,
+            'STRONG_SELL': -2,
+            'NEAR_SUPPORT_BUY': 1, 'BULLISH_ZONE': 1,
+            'NEAR_RESISTANCE_SELL': -1, 'BEARISH_ZONE': -1,
+            'Bullish Crossover': 1, 'Bearish Crossover': -1,
+        }
+        position_map = {
+            'ABOVE_PIVOT': 1, 'BELOW_PIVOT': -1,
+            'Above': 1, 'Below': -1,
+            'BULLISH': 1, 'BEARISH': -1,
+        }
+        
+        # SMA Flag encoding
+        for flag_col in ['SMA_200_Flag', 'SMA_100_Flag', 'SMA_50_Flag', 'SMA_20_Flag']:
+            target_col = flag_col.lower()
+            if flag_col in df_features.columns:
+                df_features[target_col] = df_features[flag_col].map(position_map).fillna(0).astype(float)
+                df_features.drop(columns=[flag_col], inplace=True, errors='ignore')
+            else:
+                df_features[target_col] = 0
+        
+        # MACD crossover signal
+        if 'macd_crossover_signal' in df_features.columns:
+            df_features['macd_signal_strength'] = df_features['macd_crossover_signal'].map(signal_strength_map).fillna(0).astype(float)
+            df_features.drop(columns=['macd_crossover_signal'], inplace=True, errors='ignore')
+        else:
+            df_features['macd_signal_strength'] = 0
+        
+        # Fibonacci signal
+        if 'fib_trade_signal' in df_features.columns:
+            df_features['fib_signal_strength'] = df_features['fib_trade_signal'].map(signal_strength_map).fillna(0).astype(float)
+            df_features.drop(columns=['fib_trade_signal'], inplace=True, errors='ignore')
+        else:
+            df_features['fib_signal_strength'] = 0
+        if 'fib_distance_pct' not in df_features.columns:
+            df_features['fib_distance_pct'] = 0
+        
+        # Support/Resistance
+        if 'pivot_status' in df_features.columns:
+            df_features['sr_pivot_position'] = df_features['pivot_status'].map(position_map).fillna(0).astype(float)
+            df_features.drop(columns=['pivot_status'], inplace=True, errors='ignore')
+        else:
+            df_features['sr_pivot_position'] = 0
+        if 'sr_trade_signal' in df_features.columns:
+            df_features['sr_signal_strength'] = df_features['sr_trade_signal'].map(signal_strength_map).fillna(0).astype(float)
+            df_features.drop(columns=['sr_trade_signal'], inplace=True, errors='ignore')
+        else:
+            df_features['sr_signal_strength'] = 0
+        for col in ['sr_distance_to_support_pct', 'sr_distance_to_resistance_pct']:
+            if col not in df_features.columns:
+                df_features[col] = 0
+        
+        # Candlestick Pattern signals
+        if 'pattern_signal' in df_features.columns:
+            df_features['pattern_signal_strength'] = df_features['pattern_signal'].map(signal_strength_map).fillna(0).astype(float)
+            df_features.drop(columns=['pattern_signal'], inplace=True, errors='ignore')
+        else:
+            df_features['pattern_signal_strength'] = 0
+        for col in ['has_doji', 'has_hammer', 'has_shooting_star',
+                     'has_bullish_engulfing', 'has_bearish_engulfing',
+                     'has_morning_star', 'has_evening_star']:
+            if col not in df_features.columns:
+                df_features[col] = 0
+            else:
+                df_features[col] = df_features[col].fillna(0).astype(float)
         
         # Time features
         df_features['trading_date'] = pd.to_datetime(df_features['trading_date'])

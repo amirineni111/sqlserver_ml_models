@@ -91,7 +91,7 @@ class PurgedTimeSeriesSplit:
 class UltraFastWeeklyRetrainer:
     """Ultra-fast weekly retraining with NSE-quality model architecture"""
 
-    def __init__(self, backup_old=True, days_back=365):
+    def __init__(self, backup_old=True, days_back=730):
         self.backup_old = backup_old
         self.days_back = days_back
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -340,6 +340,87 @@ class UltraFastWeeklyRetrainer:
                 print(f"  [OK] MACD Signals: {len(df_macd_sig):,} records")
         except Exception as e:
             print(f"  [WARN] MACD Signals load failed: {e}")
+
+        # Stochastic from DB
+        try:
+            stoch_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(stoch_14d_k AS FLOAT) as db_stoch_k,
+                   CAST(stoch_14d_d AS FLOAT) as db_stoch_d,
+                   CAST(momentum_strength AS FLOAT) as db_stoch_momentum
+            FROM dbo.nasdaq_100_stochastic
+            WHERE trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_stoch = self.db.execute_query(stoch_query)
+            if not df_stoch.empty:
+                df_stoch['trading_date'] = pd.to_datetime(df_stoch['trading_date'])
+                df_stoch = df_stoch.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_stoch, on=['ticker', 'trading_date'], how='left')
+                print(f"  [OK] Stochastic: {len(df_stoch):,} records")
+        except Exception as e:
+            print(f"  [WARN] Stochastic load failed: {e}")
+
+        # Fibonacci levels
+        try:
+            fib_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(distance_to_nearest_fib_pct AS FLOAT) as fib_distance_pct,
+                   fib_trade_signal
+            FROM dbo.nasdaq_100_fibonacci
+            WHERE trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_fib = self.db.execute_query(fib_query)
+            if not df_fib.empty:
+                df_fib['trading_date'] = pd.to_datetime(df_fib['trading_date'])
+                df_fib = df_fib.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_fib, on=['ticker', 'trading_date'], how='left')
+                print(f"  [OK] Fibonacci: {len(df_fib):,} records")
+        except Exception as e:
+            print(f"  [WARN] Fibonacci load failed: {e}")
+
+        # Support/Resistance
+        try:
+            sr_query = f"""
+            SELECT ticker, trading_date,
+                   CAST(distance_to_s1_pct AS FLOAT) as sr_distance_to_support_pct,
+                   CAST(distance_to_r1_pct AS FLOAT) as sr_distance_to_resistance_pct,
+                   pivot_status,
+                   sr_trade_signal
+            FROM dbo.nasdaq_100_support_resistance
+            WHERE trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_sr = self.db.execute_query(sr_query)
+            if not df_sr.empty:
+                df_sr['trading_date'] = pd.to_datetime(df_sr['trading_date'])
+                df_sr = df_sr.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_sr, on=['ticker', 'trading_date'], how='left')
+                print(f"  [OK] Support/Resistance: {len(df_sr):,} records")
+        except Exception as e:
+            print(f"  [WARN] Support/Resistance load failed: {e}")
+
+        # Candlestick Patterns
+        try:
+            pattern_query = f"""
+            SELECT ticker, trading_date,
+                   pattern_signal,
+                   CASE WHEN doji IS NOT NULL THEN 1 ELSE 0 END as has_doji,
+                   CASE WHEN hammer IS NOT NULL THEN 1 ELSE 0 END as has_hammer,
+                   CASE WHEN shooting_star IS NOT NULL THEN 1 ELSE 0 END as has_shooting_star,
+                   CASE WHEN bullish_engulfing IS NOT NULL THEN 1 ELSE 0 END as has_bullish_engulfing,
+                   CASE WHEN bearish_engulfing IS NOT NULL THEN 1 ELSE 0 END as has_bearish_engulfing,
+                   CASE WHEN morning_star IS NOT NULL THEN 1 ELSE 0 END as has_morning_star,
+                   CASE WHEN evening_star IS NOT NULL THEN 1 ELSE 0 END as has_evening_star
+            FROM dbo.nasdaq_100_patterns
+            WHERE trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
+            """
+            df_pat = self.db.execute_query(pattern_query)
+            if not df_pat.empty:
+                df_pat['trading_date'] = pd.to_datetime(df_pat['trading_date'])
+                df_pat = df_pat.drop_duplicates(subset=['ticker', 'trading_date'], keep='last')
+                df = df.merge(df_pat, on=['ticker', 'trading_date'], how='left')
+                print(f"  [OK] Patterns: {len(df_pat):,} records")
+        except Exception as e:
+            print(f"  [WARN] Patterns load failed: {e}")
 
         return df
 
@@ -595,14 +676,26 @@ class UltraFastWeeklyRetrainer:
         # Drop raw BB columns
         df.drop(columns=['db_bb_upper', 'db_bb_lower', 'db_bb_sma20'], inplace=True, errors='ignore')
 
-        # === Stochastic Oscillator (14-period, vectorized) ===
-        low_14 = df.groupby('ticker')[low_col].transform(lambda x: x.rolling(window=14, min_periods=1).min())
-        high_14 = df.groupby('ticker')[high_col].transform(lambda x: x.rolling(window=14, min_periods=1).max())
-        stoch_range = high_14 - low_14
-        df['stochastic_k'] = np.where(stoch_range > 0, (df[price_col] - low_14) / stoch_range * 100, 50)
-        df['stochastic_d'] = df.groupby('ticker')['stochastic_k'].transform(
-            lambda x: x.rolling(window=3, min_periods=1).mean()
-        )
+        # === Stochastic Oscillator (use DB if available, else calculate 14-period) ===
+        if 'db_stoch_k' in df.columns and df['db_stoch_k'].notna().any():
+            low_14 = df.groupby('ticker')[low_col].transform(lambda x: x.rolling(window=14, min_periods=1).min())
+            high_14 = df.groupby('ticker')[high_col].transform(lambda x: x.rolling(window=14, min_periods=1).max())
+            stoch_range = high_14 - low_14
+            calc_k = np.where(stoch_range > 0, (df[price_col] - low_14) / stoch_range * 100, 50)
+            df['stochastic_k'] = df['db_stoch_k'].fillna(pd.Series(calc_k, index=df.index))
+            calc_d = df.groupby('ticker')['stochastic_k'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+            df['stochastic_d'] = df['db_stoch_d'].fillna(calc_d) if 'db_stoch_d' in df.columns else calc_d
+            df['stochastic_momentum'] = df['db_stoch_momentum'].fillna(0) if 'db_stoch_momentum' in df.columns else 0
+            df.drop(columns=['db_stoch_k', 'db_stoch_d', 'db_stoch_momentum'], inplace=True, errors='ignore')
+        else:
+            low_14 = df.groupby('ticker')[low_col].transform(lambda x: x.rolling(window=14, min_periods=1).min())
+            high_14 = df.groupby('ticker')[high_col].transform(lambda x: x.rolling(window=14, min_periods=1).max())
+            stoch_range = high_14 - low_14
+            df['stochastic_k'] = np.where(stoch_range > 0, (df[price_col] - low_14) / stoch_range * 100, 50)
+            df['stochastic_d'] = df.groupby('ticker')['stochastic_k'].transform(
+                lambda x: x.rolling(window=3, min_periods=1).mean()
+            )
+            df['stochastic_momentum'] = df['stochastic_k'] - df['stochastic_d']
 
         # === ATR (use DB if available, else calculate) ===
         prev_close = df.groupby('ticker')[price_col].transform(lambda x: x.shift(1))
@@ -652,6 +745,78 @@ class UltraFastWeeklyRetrainer:
             (np.minimum(df['open_price'], df[price_col]) - df[low_col]) / df['price_range'],
             0
         )
+
+        # ================================================================
+        # ENRICHED DB FEATURE ENCODING (Fibonacci, S/R, Patterns)
+        # ================================================================
+        print("[FEATURES] Encoding enriched DB signals...")
+
+        # Signal encoding map (reusable across features)
+        signal_strength_map_full = {
+            'STRONG_BUY': 2, 'BUY': 1, 'BUY_FIB_500': 1, 'BUY_FIB_382': 1,
+            'BUY_FIB_236': 1, 'BUY_BULLISH_CROSS': 1,
+            'NEUTRAL': 0, 'NEUTRAL_WAIT': 0, 'No Signal': 0,
+            'SELL': -1, 'SELL_BEARISH_CROSS': -1,
+            'STRONG_SELL': -2,
+            'NEAR_SUPPORT_BUY': 1, 'BULLISH_ZONE': 1,
+            'NEAR_RESISTANCE_SELL': -1, 'BEARISH_ZONE': -1,
+            'Bullish Crossover': 1, 'Bearish Crossover': -1,
+        }
+        position_map = {
+            'ABOVE_PIVOT': 1, 'BELOW_PIVOT': -1,
+            'Above': 1, 'Below': -1,
+            'BULLISH': 1, 'BEARISH': -1,
+        }
+
+        # --- Fibonacci signal ---
+        if 'fib_trade_signal' in df.columns:
+            df['fib_signal_strength'] = df['fib_trade_signal'].map(
+                signal_strength_map_full
+            ).fillna(0).astype(float)
+            df.drop(columns=['fib_trade_signal'], inplace=True, errors='ignore')
+        else:
+            df['fib_signal_strength'] = 0
+        if 'fib_distance_pct' not in df.columns:
+            df['fib_distance_pct'] = 0
+
+        # --- Support/Resistance signals ---
+        if 'pivot_status' in df.columns:
+            df['sr_pivot_position'] = df['pivot_status'].map(
+                position_map
+            ).fillna(0).astype(float)
+            df.drop(columns=['pivot_status'], inplace=True, errors='ignore')
+        else:
+            df['sr_pivot_position'] = 0
+
+        if 'sr_trade_signal' in df.columns:
+            df['sr_signal_strength'] = df['sr_trade_signal'].map(
+                signal_strength_map_full
+            ).fillna(0).astype(float)
+            df.drop(columns=['sr_trade_signal'], inplace=True, errors='ignore')
+        else:
+            df['sr_signal_strength'] = 0
+
+        for col in ['sr_distance_to_support_pct', 'sr_distance_to_resistance_pct']:
+            if col not in df.columns:
+                df[col] = 0
+
+        # --- Pattern signals ---
+        if 'pattern_signal' in df.columns:
+            df['pattern_signal_strength'] = df['pattern_signal'].map(
+                signal_strength_map_full
+            ).fillna(0).astype(float)
+            df.drop(columns=['pattern_signal'], inplace=True, errors='ignore')
+        else:
+            df['pattern_signal_strength'] = 0
+
+        # Pattern binary flags (already 0/1 from SQL CASE)
+        for col in ['has_doji', 'has_hammer', 'has_shooting_star',
+                     'has_bullish_engulfing', 'has_bearish_engulfing',
+                     'has_morning_star', 'has_evening_star']:
+            if col not in df.columns:
+                df[col] = 0
+            else:
+                df[col] = df[col].fillna(0).astype(float)
 
         # ================================================================
         # MARKET REGIME DETECTION
@@ -757,6 +922,8 @@ class UltraFastWeeklyRetrainer:
                      'xlv_return_1d', 'xli_return_1d', 'xlc_return_1d',
                      'xly_return_1d', 'xlp_return_1d', 'xlb_return_1d',
                      'xlre_return_1d', 'xlu_return_1d',
+                     # Raw pattern/signal categorical columns already encoded
+                     'patterns_detected',
                      ]
         df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True, errors='ignore')
 
@@ -807,26 +974,57 @@ class UltraFastWeeklyRetrainer:
         print(f"  Balance: {balance}")
 
         # ================================================================
-        # FEATURE SELECTION (mutual_info_classif — top N)
+        # FEATURE SELECTION (STRATIFIED: market-wide + stock-specific)
         # ================================================================
-        print("[PREP] Running feature selection (mutual_info_classif)...")
+        print("[PREP] Running STRATIFIED feature selection (mutual_info_classif)...")
         try:
-            mi_scores = mutual_info_classif(X, y_direction_encoded, random_state=42)
-            mi_ranking = pd.Series(mi_scores, index=feature_cols).sort_values(ascending=False)
+            # Define market-wide feature patterns (same for all stocks on a given day)
+            MARKET_WIDE_PATTERNS = [
+                'vix_close', 'vix_change_pct', 'sp500_return_1d', 'sp500_close',
+                'nasdaq_comp_return_1d', 'nasdaq_comp_close',
+                'dxy_return_1d', 'dxy_close',
+                'us_10y_yield_close', 'us_10y_yield_change',
+                'xlk_return_1d', 'xlf_return_1d', 'xle_return_1d', 'xlv_return_1d',
+                'xli_return_1d', 'xlc_return_1d', 'xly_return_1d', 'xlp_return_1d',
+                'xlb_return_1d', 'xlre_return_1d', 'xlu_return_1d',
+                'sector_etf_return_1d',
+                'trading_days_in_week', 'day_of_week', 'month',
+                'is_pre_holiday', 'is_post_holiday', 'is_short_week',
+                'is_month_end', 'is_month_start', 'is_quarter_end',
+                'is_options_expiry', 'days_until_next_holiday',
+                'days_since_last_holiday', 'other_market_closed',
+            ]
+            market_features = [f for f in feature_cols if f in MARKET_WIDE_PATTERNS]
+            stock_features = [f for f in feature_cols if f not in MARKET_WIDE_PATTERNS]
+            print(f"  Market-wide features: {len(market_features)}")
+            print(f"  Stock-specific features: {len(stock_features)}")
 
-            # Select top 20 features (matches NSE approach)
-            n_select = min(20, len(feature_cols))
-            selected_features = mi_ranking.head(n_select).index.tolist()
+            # Compute MI scores for both groups separately
+            mi_scores_all = mutual_info_classif(X, y_direction_encoded, random_state=42)
+            mi_all = pd.Series(mi_scores_all, index=feature_cols).sort_values(ascending=False)
 
-            print(f"  Top {n_select} features selected:")
-            for i, (feat, score) in enumerate(mi_ranking.head(n_select).items()):
-                print(f"    {i+1:2d}. {feat} (MI={score:.4f})")
+            mi_market = mi_all[mi_all.index.isin(market_features)].sort_values(ascending=False)
+            mi_stock = mi_all[mi_all.index.isin(stock_features)].sort_values(ascending=False)
+
+            # Stratified selection: top-8 market + top-22 stock = 30 features
+            n_market = min(8, len(mi_market))
+            n_stock = min(22, len(mi_stock))
+            selected_market = mi_market.head(n_market).index.tolist()
+            selected_stock = mi_stock.head(n_stock).index.tolist()
+            selected_features = selected_stock + selected_market  # stock-specific first
+
+            print(f"\n  Selected {len(selected_stock)} stock-specific features:")
+            for i, feat in enumerate(selected_stock):
+                print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
+            print(f"\n  Selected {len(selected_market)} market-wide features:")
+            for i, feat in enumerate(selected_market):
+                print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
 
             # Save selected features for prediction consistency
             features_path = self.data_dir / 'selected_features.json'
             with open(features_path, 'w') as f:
                 json.dump(selected_features, f, indent=2)
-            print(f"  Saved to {features_path}")
+            print(f"\n  Total: {len(selected_features)} features saved to {features_path}")
 
             X = X[selected_features]
             feature_cols = selected_features
@@ -1095,16 +1293,21 @@ class UltraFastWeeklyRetrainer:
             except Exception as e:
                 print(f"    [ERROR] {model_name}: {e}")
 
-        # Regression ensemble
-        print("  Training Regression Ensemble...")
+        # Regression ensemble — use pre-fitted models (skip expensive re-training)
+        print("  Creating Regression Ensemble (from pre-fitted models)...")
         try:
-            reg_estimators = [
-                (name.lower().replace(' ', '_'), model)
-                for name, model in trained_models.items()
-            ]
-            reg_ensemble = VotingRegressor(estimators=reg_estimators, n_jobs=1)
-            reg_ensemble.fit(X_train_scaled, y_train_clipped)
+            class PreFittedEnsemble:
+                """Simple averaging ensemble from already-trained models."""
+                def __init__(self, models_dict):
+                    self.models = list(models_dict.values())
+                    self.model_names = list(models_dict.keys())
+                def predict(self, X):
+                    preds = np.column_stack([m.predict(X) for m in self.models])
+                    return preds.mean(axis=1)
+                def get_params(self, deep=True):
+                    return {'models_dict': dict(zip(self.model_names, self.models))}
 
+            reg_ensemble = PreFittedEnsemble(trained_models)
             y_pred_ens = reg_ensemble.predict(X_test_scaled)
             ens_mae = mean_absolute_error(y_test, y_pred_ens)
             ens_dir = accuracy_score(
@@ -1154,11 +1357,14 @@ class UltraFastWeeklyRetrainer:
         joblib.dump(reg_results['best_model'], reg_path)
         print(f"  [OK] Best regressor -> {reg_path}")
 
-        # Save all regression models
+        # Save all regression models (skip unpicklable custom ensembles)
         for name, model in reg_results['trained_models'].items():
             safe_name = name.lower().replace(' ', '_')
             path = self.data_dir / f'reg_{safe_name}.joblib'
-            joblib.dump(model, path)
+            try:
+                joblib.dump(model, path)
+            except Exception as e:
+                print(f"  [SKIP] reg_{safe_name}: {e}")
 
         # Save preprocessing artifacts
         joblib.dump(clf_results['scaler'], self.data_dir / 'scaler.joblib')
@@ -1260,8 +1466,8 @@ def main():
     parser = argparse.ArgumentParser(description='Ultra-Fast Weekly Model Retraining (Enhanced)')
     parser.add_argument('--no-backup', action='store_true',
                         help='Skip backup for maximum speed')
-    parser.add_argument('--days-back', type=int, default=365,
-                        help='Training data window in days (default: 365)')
+    parser.add_argument('--days-back', type=int, default=730,
+                        help='Training data window in days (default: 730)')
 
     args = parser.parse_args()
 
