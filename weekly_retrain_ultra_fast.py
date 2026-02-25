@@ -202,12 +202,85 @@ class UltraFastWeeklyRetrainer:
             df = self._merge_enriched_db_features(df)
             df = self._merge_market_context(df)
             df = self._merge_calendar_features(df, market='NASDAQ')
+            df = self._merge_sentiment(df)
 
             return df
 
         except Exception as e:
             print(f"[ERROR] Error loading data: {e}")
             raise
+
+    def _merge_sentiment(self, df):
+        """Load sector sentiment scores from nasdaq_sector_sentiment and merge.
+
+        Adds 10 sentiment features per row:
+        - sector_sentiment_score, sector_sentiment_confidence
+        - sector_sentiment_momentum_3d, sector_sentiment_momentum_7d
+        - sector_sentiment_vs_avg_30d
+        - sector_positive_ratio, sector_negative_ratio
+        - sector_news_volume (log-scaled news count)
+        - market_sentiment_score
+        - sentiment_price_divergence (computed later in engineer_features_vectorized)
+
+        Merges on (trading_date, sector). Gracefully defaults to 0 if table missing.
+        """
+        print("[DATA] Loading sector sentiment data...")
+
+        try:
+            sent_query = """
+            SELECT trading_date, sector,
+                   sentiment_score, confidence,
+                   sentiment_momentum_3d, sentiment_momentum_7d,
+                   sentiment_vs_avg_30d,
+                   positive_ratio, negative_ratio,
+                   news_count,
+                   market_sentiment_score
+            FROM dbo.nasdaq_sector_sentiment
+            ORDER BY trading_date
+            """
+            df_sent = self.db.execute_query(sent_query)
+
+            if not df_sent.empty:
+                df['trading_date'] = pd.to_datetime(df['trading_date'])
+                df_sent['trading_date'] = pd.to_datetime(df_sent['trading_date'])
+
+                # Rename columns to avoid clashes
+                df_sent = df_sent.rename(columns={
+                    'sentiment_score': 'sector_sentiment_score',
+                    'confidence': 'sector_sentiment_confidence',
+                    'sentiment_momentum_3d': 'sector_sentiment_momentum_3d',
+                    'sentiment_momentum_7d': 'sector_sentiment_momentum_7d',
+                    'sentiment_vs_avg_30d': 'sector_sentiment_vs_avg_30d',
+                    'positive_ratio': 'sector_positive_ratio',
+                    'negative_ratio': 'sector_negative_ratio',
+                    'news_count': 'sector_news_volume',
+                })
+
+                # Log-scale news volume
+                df_sent['sector_news_volume'] = np.log1p(df_sent['sector_news_volume'])
+
+                # Merge on (trading_date, sector)
+                df = df.merge(df_sent, on=['trading_date', 'sector'], how='left')
+
+                matched = df['sector_sentiment_score'].notna().sum()
+                print(f"  Sentiment merged: {len(df_sent)} records, {matched} matched rows")
+            else:
+                print("  [WARN] No sentiment data found — run collect_sector_sentiment.py --backfill 30")
+        except Exception as e:
+            print(f"  [WARN] Could not load sentiment (table may not exist yet): {e}")
+
+        # Ensure all sentiment columns exist with default 0
+        for col in ['sector_sentiment_score', 'sector_sentiment_confidence',
+                     'sector_sentiment_momentum_3d', 'sector_sentiment_momentum_7d',
+                     'sector_sentiment_vs_avg_30d', 'sector_positive_ratio',
+                     'sector_negative_ratio', 'sector_news_volume',
+                     'market_sentiment_score']:
+            if col not in df.columns:
+                df[col] = 0
+            else:
+                df[col] = df[col].fillna(0)
+
+        return df
 
     def _merge_fundamentals(self, df):
         """Load fundamentals & sector data separately and merge"""
@@ -912,6 +985,32 @@ class UltraFastWeeklyRetrainer:
         else:
             df['sector_etf_return_1d'] = 0
 
+        # ================================================================
+        # SENTIMENT-PRICE DIVERGENCE
+        # Detects when sentiment is negative but price looks bullish (or vice versa)
+        # Key signal for catching sector-wide downturns the model might miss.
+        # ================================================================
+        print("[FEATURES] Adding sentiment-price divergence...")
+        if 'sector_sentiment_score' in df.columns:
+            # Use 5-day return for price direction
+            if 'return_5d' in df.columns:
+                _price_dir = df['return_5d']
+            else:
+                _price_dir = df.groupby('ticker')[price_col].transform(
+                    lambda x: x.pct_change(5)
+                )
+            sent = df['sector_sentiment_score']
+            price_dir_sign = np.sign(_price_dir)
+            sent_dir_sign = np.sign(sent)
+            # divergence = 1 when sentiment and price move opposite, magnitude-weighted
+            df['sentiment_price_divergence'] = np.where(
+                (price_dir_sign != sent_dir_sign) & (sent_dir_sign != 0),
+                np.abs(sent) * 2,  # Amplify divergence signal
+                0
+            )
+        else:
+            df['sentiment_price_divergence'] = 0
+
         # Drop raw DB/merge columns not needed as features
         drop_cols = ['db_macd', 'db_macd_signal', 'company', 'rsi_trade_signal',
                      'next_5d_close', 'sector',
@@ -993,6 +1092,13 @@ class UltraFastWeeklyRetrainer:
                 'is_month_end', 'is_month_start', 'is_quarter_end',
                 'is_options_expiry', 'days_until_next_holiday',
                 'days_since_last_holiday', 'other_market_closed',
+                # Sector sentiment features (from nasdaq_sector_sentiment)
+                'sector_sentiment_score', 'sector_sentiment_confidence',
+                'sector_sentiment_momentum_3d', 'sector_sentiment_momentum_7d',
+                'sector_sentiment_vs_avg_30d',
+                'sector_positive_ratio', 'sector_negative_ratio',
+                'sector_news_volume', 'market_sentiment_score',
+                'sentiment_price_divergence',
             ]
             market_features = [f for f in feature_cols if f in MARKET_WIDE_PATTERNS]
             stock_features = [f for f in feature_cols if f not in MARKET_WIDE_PATTERNS]
@@ -1466,14 +1572,29 @@ def main():
     parser = argparse.ArgumentParser(description='Ultra-Fast Weekly Model Retraining (Enhanced)')
     parser.add_argument('--no-backup', action='store_true',
                         help='Skip backup for maximum speed')
-    parser.add_argument('--days-back', type=int, default=730,
-                        help='Training data window in days (default: 730)')
+    parser.add_argument('--backup-old', action='store_true', default=True,
+                        help='Backup existing model before retraining (default: enabled)')
+    parser.add_argument('--quick', action='store_true',
+                        help='Use shorter training window (365 days instead of 730)')
+    parser.add_argument('--days-back', type=int, default=None,
+                        help='Training data window in days (default: 730, or 365 with --quick)')
 
     args = parser.parse_args()
 
+    # --quick sets 365-day window unless --days-back is explicitly provided
+    if args.days_back is not None:
+        days_back = args.days_back
+    elif args.quick:
+        days_back = 365
+    else:
+        days_back = 730
+
+    # --no-backup overrides --backup-old
+    backup = not args.no_backup
+
     retrainer = UltraFastWeeklyRetrainer(
-        backup_old=not args.no_backup,
-        days_back=args.days_back
+        backup_old=backup,
+        days_back=days_back
     )
 
     success = retrainer.run_ultra_fast_retrain()

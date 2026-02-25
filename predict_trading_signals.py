@@ -173,6 +173,8 @@ class TradingSignalPredictor:
             df = self._merge_market_context(df)
             # Merge calendar features (holidays, short weeks, expiry)
             df = self._merge_calendar_features(df, market='NASDAQ')
+            # Merge sector sentiment (VADER + FinBERT)
+            df = self._merge_sentiment(df)
             return df
         except Exception as e:
             safe_print(f"❌ Error fetching data: {e}")
@@ -324,6 +326,63 @@ class TradingSignalPredictor:
                 df = df.merge(df_pat, on=['ticker', 'trading_date'], how='left')
         except Exception as e:
             print(f"[WARN] Patterns load failed: {e}")
+        
+        return df
+    
+    def _merge_sentiment(self, df):
+        """Load sector sentiment scores from nasdaq_sector_sentiment and merge.
+        
+        Mirrors the training pipeline's _merge_sentiment method.
+        Merges on (trading_date, sector), defaults to 0 if table missing.
+        """
+        try:
+            sent_query = """
+            SELECT trading_date, sector,
+                   sentiment_score, confidence,
+                   sentiment_momentum_3d, sentiment_momentum_7d,
+                   sentiment_vs_avg_30d,
+                   positive_ratio, negative_ratio,
+                   news_count,
+                   market_sentiment_score
+            FROM dbo.nasdaq_sector_sentiment
+            ORDER BY trading_date
+            """
+            df_sent = self.db.execute_query(sent_query)
+            
+            if not df_sent.empty:
+                df['trading_date'] = pd.to_datetime(df['trading_date'])
+                df_sent['trading_date'] = pd.to_datetime(df_sent['trading_date'])
+                
+                # Rename columns to avoid clashes
+                df_sent = df_sent.rename(columns={
+                    'sentiment_score': 'sector_sentiment_score',
+                    'confidence': 'sector_sentiment_confidence',
+                    'sentiment_momentum_3d': 'sector_sentiment_momentum_3d',
+                    'sentiment_momentum_7d': 'sector_sentiment_momentum_7d',
+                    'sentiment_vs_avg_30d': 'sector_sentiment_vs_avg_30d',
+                    'positive_ratio': 'sector_positive_ratio',
+                    'negative_ratio': 'sector_negative_ratio',
+                    'news_count': 'sector_news_volume',
+                })
+                
+                # Log-scale news volume
+                df_sent['sector_news_volume'] = np.log1p(df_sent['sector_news_volume'])
+                
+                # Merge on (trading_date, sector)
+                df = df.merge(df_sent, on=['trading_date', 'sector'], how='left')
+        except Exception as e:
+            print(f"[WARN] Could not load sentiment: {e}")
+        
+        # Ensure all sentiment columns exist with default 0
+        for col in ['sector_sentiment_score', 'sector_sentiment_confidence',
+                     'sector_sentiment_momentum_3d', 'sector_sentiment_momentum_7d',
+                     'sector_sentiment_vs_avg_30d', 'sector_positive_ratio',
+                     'sector_negative_ratio', 'sector_news_volume',
+                     'market_sentiment_score']:
+            if col not in df.columns:
+                df[col] = 0
+            else:
+                df[col] = df[col].fillna(0)
         
         return df
     
@@ -551,6 +610,25 @@ class TradingSignalPredictor:
                 lambda row: row.get(row['sector_etf_return_1d'], 0) if pd.notna(row.get('sector_etf_return_1d')) else 0,
                 axis=1
             )
+        
+        # ================================================================
+        # PHASE 6: Sentiment-price divergence
+        # Detects when sentiment and price direction disagree.
+        # ================================================================
+        if 'sector_sentiment_score' in df_features.columns:
+            _price_dir = df_features.groupby('ticker')['close_price'].transform(
+                lambda x: x.pct_change(5)
+            )
+            sent = df_features['sector_sentiment_score']
+            price_sign = np.sign(_price_dir)
+            sent_sign = np.sign(sent)
+            df_features['sentiment_price_divergence'] = np.where(
+                (price_sign != sent_sign) & (sent_sign != 0),
+                np.abs(sent) * 2,
+                0
+            )
+        else:
+            df_features['sentiment_price_divergence'] = 0
         
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
         df_features = df_features.fillna(method='ffill').fillna(0)

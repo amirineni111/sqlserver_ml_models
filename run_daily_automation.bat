@@ -12,6 +12,14 @@ echo.
 REM Change to the script directory
 cd /d "%~dp0"
 
+REM Activate the virtual environment
+if exist ".venv\Scripts\activate.bat" (
+    echo [INFO] Activating virtual environment...
+    call .venv\Scripts\activate.bat
+) else (
+    echo [WARNING] Virtual environment not found at .venv, using system Python
+)
+
 REM Set the Python executable (adjust if needed)
 set PYTHON_EXE=python
 

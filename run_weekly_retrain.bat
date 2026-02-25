@@ -12,6 +12,14 @@ echo.
 REM Change to the script directory
 cd /d "%~dp0"
 
+REM Activate the virtual environment
+if exist ".venv\Scripts\activate.bat" (
+    echo [INFO] Activating virtual environment...
+    call .venv\Scripts\activate.bat
+) else (
+    echo [WARNING] Virtual environment not found at .venv, using system Python
+)
+
 REM Set the Python executable (adjust if needed)
 set PYTHON_EXE=python
 
@@ -31,9 +39,9 @@ echo.
 REM Create backup directory if it doesn't exist
 if not exist "data\backups" mkdir "data\backups"
 
-REM Run the weekly model retraining with backup and comparison
-echo [INFO] Running weekly model retraining with backup and performance comparison...
-%PYTHON_EXE% retrain_model.py --backup-old --compare-models
+REM Run the ultra-fast weekly model retraining (vectorized, ensemble + calibration)
+echo [INFO] Running ULTRA-FAST weekly model retraining...
+%PYTHON_EXE% weekly_retrain_ultra_fast.py
 
 REM Check if retraining was successful
 if errorlevel 1 (

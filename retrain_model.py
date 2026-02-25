@@ -210,6 +210,9 @@ class ModelRetrainer:
             # Load calendar features (holidays, short weeks, expiry) and merge
             df = self._merge_calendar_features(df, market='NASDAQ')
             
+            # Load sector sentiment (VADER + FinBERT) and merge
+            df = self._merge_sentiment(df)
+            
             return df
             
         except Exception as e:
@@ -295,6 +298,78 @@ class ModelRetrainer:
                 print("  [WARN] No market context data found — run get_market_context_daily.py --backfill")
         except Exception as e:
             print(f"  [WARN] Could not load market context: {e}")
+        
+        return df
+    
+    def _merge_sentiment(self, df):
+        """Load sector sentiment scores from nasdaq_sector_sentiment and merge.
+        
+        Adds 10 sentiment features per row:
+        - sector_sentiment_score, sector_sentiment_confidence
+        - sector_sentiment_momentum_3d, sector_sentiment_momentum_7d
+        - sector_sentiment_vs_avg_30d
+        - sector_positive_ratio, sector_negative_ratio
+        - sector_news_volume (log-scaled news count)
+        - market_sentiment_score
+        - sentiment_price_divergence (computed later in engineer_features)
+        
+        Merges on (trading_date, sector). Gracefully defaults to 0 if table missing.
+        """
+        print("[DATA] Loading sector sentiment data...")
+        
+        try:
+            sent_query = """
+            SELECT trading_date, sector,
+                   sentiment_score, confidence,
+                   sentiment_momentum_3d, sentiment_momentum_7d,
+                   sentiment_vs_avg_30d,
+                   positive_ratio, negative_ratio,
+                   news_count,
+                   market_sentiment_score
+            FROM dbo.nasdaq_sector_sentiment
+            ORDER BY trading_date
+            """
+            df_sent = self.db.execute_query(sent_query)
+            
+            if not df_sent.empty:
+                df['trading_date'] = pd.to_datetime(df['trading_date'])
+                df_sent['trading_date'] = pd.to_datetime(df_sent['trading_date'])
+                
+                # Rename columns to avoid clashes
+                df_sent = df_sent.rename(columns={
+                    'sentiment_score': 'sector_sentiment_score',
+                    'confidence': 'sector_sentiment_confidence',
+                    'sentiment_momentum_3d': 'sector_sentiment_momentum_3d',
+                    'sentiment_momentum_7d': 'sector_sentiment_momentum_7d',
+                    'sentiment_vs_avg_30d': 'sector_sentiment_vs_avg_30d',
+                    'positive_ratio': 'sector_positive_ratio',
+                    'negative_ratio': 'sector_negative_ratio',
+                    'news_count': 'sector_news_volume',
+                })
+                
+                # Log-scale news volume
+                df_sent['sector_news_volume'] = np.log1p(df_sent['sector_news_volume'])
+                
+                # Merge on (trading_date, sector)
+                df = df.merge(df_sent, on=['trading_date', 'sector'], how='left')
+                
+                matched = df['sector_sentiment_score'].notna().sum()
+                print(f"  Sentiment merged: {len(df_sent)} records, {matched} matched rows")
+            else:
+                print("  [WARN] No sentiment data found — run collect_sector_sentiment.py --backfill 30")
+        except Exception as e:
+            print(f"  [WARN] Could not load sentiment (table may not exist yet): {e}")
+        
+        # Ensure all sentiment columns exist with default 0
+        for col in ['sector_sentiment_score', 'sector_sentiment_confidence',
+                     'sector_sentiment_momentum_3d', 'sector_sentiment_momentum_7d',
+                     'sector_sentiment_vs_avg_30d', 'sector_positive_ratio',
+                     'sector_negative_ratio', 'sector_news_volume',
+                     'market_sentiment_score']:
+            if col not in df.columns:
+                df[col] = 0
+            else:
+                df[col] = df[col].fillna(0)
         
         return df
     
@@ -505,6 +580,34 @@ class ModelRetrainer:
                 axis=1
             )
             print(f"  Sector ETF return mapped for {df_features['sector_etf_return_1d'].notna().sum()} rows")
+        
+        # ================================================================
+        # PHASE 6: Sentiment-price divergence
+        # Detects when sentiment is negative but price looks bullish (or vice versa)
+        # Key signal for catching sector-wide downturns the model might miss.
+        # ================================================================
+        if 'sector_sentiment_score' in df_features.columns and 'return_5d' not in df_features.columns:
+            # return_5d may not be computed yet in this method — use a simple proxy
+            df_features['_price_direction'] = df_features.groupby('ticker')['close_price'].transform(
+                lambda x: x.pct_change(5)
+            )
+        else:
+            df_features['_price_direction'] = df_features.get('return_5d', 0)
+        
+        if 'sector_sentiment_score' in df_features.columns:
+            sent = df_features['sector_sentiment_score']
+            price_dir = np.sign(df_features['_price_direction'])
+            sent_dir = np.sign(sent)
+            # divergence = 1 when sentiment and price move opposite, magnitude-weighted
+            df_features['sentiment_price_divergence'] = np.where(
+                (price_dir != sent_dir) & (sent_dir != 0),
+                np.abs(sent) * 2,  # Amplify divergence signal
+                0
+            )
+        else:
+            df_features['sentiment_price_divergence'] = 0
+        
+        df_features = df_features.drop(columns=['_price_direction'], errors='ignore')
         
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
         df_features = df_features.fillna(method='ffill').fillna(0)
@@ -752,6 +855,14 @@ class ModelRetrainer:
             'is_quarter_end', 'is_options_expiry',
             'days_until_next_holiday', 'days_since_last_holiday',
             'other_market_closed',
+            # Phase 6: Sector sentiment features (from nasdaq_sector_sentiment)
+            'sector_sentiment_score', 'sector_sentiment_confidence',
+            'sector_sentiment_momentum_3d', 'sector_sentiment_momentum_7d',
+            'sector_sentiment_vs_avg_30d',
+            'sector_positive_ratio', 'sector_negative_ratio',
+            'sector_news_volume',
+            'market_sentiment_score',
+            'sentiment_price_divergence',
         ]
         # Filter to only features that exist in the DataFrame
         feature_cols = [col for col in feature_cols if col in df_features.columns]

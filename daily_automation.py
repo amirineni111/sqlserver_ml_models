@@ -160,10 +160,10 @@ def run_model_retraining():
         logging.info("🚀 Starting automated model retraining...")
         start_time = datetime.now()
         
-        # Run retraining with backup
+        # Run retraining with ultra-fast pipeline (vectorized, ensemble + calibration)
         result = subprocess.run([
-            sys.executable, "retrain_model.py", "--backup-old", "--quick"
-        ], capture_output=True, text=True, timeout=1800)  # 30 minute timeout
+            sys.executable, "weekly_retrain_ultra_fast.py"
+        ], capture_output=True, text=True, timeout=3600)  # 60 minute timeout
         
         end_time = datetime.now()
         training_time = (end_time - start_time).total_seconds() / 60
@@ -237,6 +237,37 @@ def export_to_database():
         return False, 0
     except Exception as e:
         logging.error(f"❌ Error exporting to database: {str(e)}")
+        return False, 0
+
+def run_sentiment_collection():
+    """
+    Run sector sentiment collection before predictions.
+    Collects news from RSS/GDELT/NewsAPI and scores via VADER+FinBERT.
+    Returns: (success, sector_count)
+    """
+    try:
+        logging.info("📰 Running sector sentiment collection...")
+        
+        result = subprocess.run([
+            sys.executable, "collect_sector_sentiment.py"
+        ], capture_output=True, text=True, timeout=600)  # 10 minute timeout
+        
+        if result.returncode == 0:
+            # Count sectors from output
+            sector_count = result.stdout.count('score=')
+            logging.info(f"✅ Sentiment collection completed: {sector_count} sectors scored")
+            return True, sector_count
+        else:
+            logging.error(f"❌ Sentiment collection failed")
+            if result.stderr:
+                logging.error(f"  stderr: {result.stderr[:500]}")
+            return False, 0
+            
+    except subprocess.TimeoutExpired:
+        logging.error("⏰ Sentiment collection timed out after 10 minutes")
+        return False, 0
+    except Exception as e:
+        logging.error(f"❌ Error during sentiment collection: {str(e)}")
         return False, 0
 
 def create_daily_summary(log_filename, data_status, retrain_info, db_info):
@@ -336,7 +367,15 @@ def main():
                 logging.info("⏭️ Skipping model retraining")
                 retrain_info = (False, None, None, reason)
         
-        # Step 3/4: Database Export
+        # Step 3/4: Sentiment Collection + Database Export
+        logging.info("=" * 60)
+        logging.info("STEP 3a: SECTOR SENTIMENT COLLECTION")
+        logging.info("=" * 60)
+        
+        sent_success, sent_sectors = run_sentiment_collection()
+        if not sent_success:
+            logging.warning("⚠️ Sentiment collection failed — predictions will use zero defaults")
+        
         logging.info("=" * 60)
         logging.info("STEP 4: DATABASE EXPORT" if not args.export_only else "DATABASE EXPORT")
         logging.info("=" * 60)
