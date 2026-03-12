@@ -24,6 +24,10 @@ from pathlib import Path
 import subprocess
 import json
 
+# Add src to path for email alerts
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+from notifications.email_alerts import send_failure_alert, is_email_configured
+
 # Setup logging
 def setup_logging():
     """Setup comprehensive logging for daily automation."""
@@ -203,7 +207,7 @@ def export_to_database():
         # Export to database
         db_export_result = subprocess.run([
             sys.executable, "export_to_database.py", "--batch"
-        ], capture_output=True, text=True, timeout=300)  # 5 minute timeout
+        ], capture_output=True, text=True, timeout=600)  # 10 minute timeout
         
         if db_export_result.returncode != 0:
             if db_export_result.stdout:
@@ -214,12 +218,11 @@ def export_to_database():
         
         # Parse output to get record count
         record_count = 0
+        import re
         output_lines = db_export_result.stdout.strip().split('\n')
         for line in output_lines:
-            if "records inserted" in line.lower() or "rows inserted" in line.lower():
+            if "records inserted" in line.lower() or "rows inserted" in line.lower() or "total predictions:" in line.lower():
                 try:
-                    # Extract number from line
-                    import re
                     numbers = re.findall(r'\d+', line)
                     if numbers:
                         record_count = int(numbers[0])
@@ -321,6 +324,11 @@ def main():
     logging.info("🚀 Starting daily automation for SQL Server ML Trading Signals System")
     logging.info(f"📝 Log file: {log_filename}")
     
+    if is_email_configured():
+        logging.info("📧 Email alerts enabled")
+    else:
+        logging.info("📧 Email alerts not configured (set ALERT_EMAIL_FROM/PASSWORD/TO in .env)")
+    
     # Track results
     data_status = None
     retrain_info = None
@@ -337,6 +345,14 @@ def main():
         
         if not is_connected:
             logging.error("❌ Cannot connect to SQL Server database. Aborting automation.")
+            send_failure_alert(
+                f"SQL Server connection failed.\n"
+                f"Server: {os.getenv('SQL_SERVER', 'unknown')}\n"
+                f"The database was unreachable at the scheduled run time.\n"
+                f"Predictions were NOT generated for today.",
+                step_name="Database Connection",
+                log_file_path=str(log_filename),
+            )
             return 1
         
         if args.check_only:
@@ -363,6 +379,13 @@ def main():
                 
                 if not retrain_success:
                     logging.error("❌ Model retraining failed. Continuing with database export using existing model.")
+                    send_failure_alert(
+                        f"Model retraining failed after {training_time:.1f} minutes.\n"
+                        f"Continuing with database export using existing model.\n"
+                        f"Data age: {data_age_days} days, Latest: {latest_date}",
+                        step_name="Model Retraining",
+                        log_file_path=str(log_filename),
+                    )
             else:
                 logging.info("⏭️ Skipping model retraining")
                 retrain_info = (False, None, None, reason)
@@ -385,6 +408,14 @@ def main():
         
         if not db_success:
             logging.error("❌ Database export failed")
+            send_failure_alert(
+                f"Database export step failed or timed out.\n"
+                f"Model retraining was {'successful' if retrain_info and retrain_info[1] else 'not performed/failed'}.\n"
+                f"Predictions were NOT written to ml_trading_predictions.\n"
+                f"Data age: {data_age_days} days, Latest: {latest_date}",
+                step_name="Database Export",
+                log_file_path=str(log_filename),
+            )
         
         # Final summary
         logging.info("=" * 60)

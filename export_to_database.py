@@ -238,6 +238,7 @@ class DatabaseExporter:
             print(f"\n[COMPLETE] Database export completed successfully!")
             print(f"Run Timestamp: {run_timestamp}")
             print(f"Total Predictions: {len(predictions_df)}")
+            print(f"{len(predictions_df)} records inserted to database")
             
             return True
             
