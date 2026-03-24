@@ -216,13 +216,13 @@ class TradingSignalPredictor:
         """Load enriched features from DB views (SMA signals, MACD signals, S/R, Fibonacci, Patterns, Stochastic)"""
         df['trading_date'] = pd.to_datetime(df['trading_date'])
         
-        # SMA Signals
+        # SMA Signals (updated for new view schema — SMA_200/100/Flags removed, replaced by Trend_Status etc.)
         try:
             sma_query = f"""
             SELECT ticker, trading_date,
-                   CAST(SMA_200 AS FLOAT) as sma_200,
-                   CAST(SMA_100 AS FLOAT) as sma_100,
-                   SMA_200_Flag, SMA_100_Flag, SMA_50_Flag, SMA_20_Flag
+                   CAST(EMA_100 AS FLOAT) as db_ema_100,
+                   CAST(EMA_200 AS FLOAT) as db_ema_200,
+                   Trend_Status, SMA_Cross_Status, sma_trade_signal
             FROM dbo.nasdaq_100_sma_signals
             WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
             """
@@ -234,11 +234,11 @@ class TradingSignalPredictor:
         except Exception as e:
             print(f"[WARN] SMA Signals load failed: {e}")
         
-        # MACD Signals (crossover)
+        # MACD Signals (crossover — column renamed from MACD_Signal to macd_trade_signal)
         try:
             macd_sig_query = f"""
             SELECT ticker, trading_date,
-                   MACD_Signal as macd_crossover_signal
+                   macd_trade_signal as macd_crossover_signal
             FROM dbo.nasdaq_100_macd_signals
             WHERE trading_date >= DATEADD(DAY, -{days_back}, CAST(GETDATE() AS DATE))
             """
@@ -495,14 +495,32 @@ class TradingSignalPredictor:
             'BULLISH': 1, 'BEARISH': -1,
         }
         
-        # SMA Flag encoding
-        for flag_col in ['SMA_200_Flag', 'SMA_100_Flag', 'SMA_50_Flag', 'SMA_20_Flag']:
-            target_col = flag_col.lower()
-            if flag_col in df_features.columns:
-                df_features[target_col] = df_features[flag_col].map(position_map).fillna(0).astype(float)
-                df_features.drop(columns=[flag_col], inplace=True, errors='ignore')
-            else:
-                df_features[target_col] = 0
+        # SMA Trend/Cross encoding (new view schema replaces old SMA_*_Flag columns)
+        trend_map = {
+            'STRONG_UPTREND': 2, 'UPTREND': 1, 'NEUTRAL': 0,
+            'DOWNTREND': -1, 'STRONG_DOWNTREND': -2,
+        }
+        cross_map = {
+            'GOLDEN_CROSS_ZONE': 1, 'NEUTRAL': 0, 'DEATH_CROSS_ZONE': -1,
+        }
+        sma_signal_map = {
+            'Golden Cross': 1, 'Death Cross': -1,
+        }
+        if 'Trend_Status' in df_features.columns:
+            df_features['sma_trend_strength'] = df_features['Trend_Status'].map(trend_map).fillna(0).astype(float)
+            df_features.drop(columns=['Trend_Status'], inplace=True, errors='ignore')
+        else:
+            df_features['sma_trend_strength'] = 0
+        if 'SMA_Cross_Status' in df_features.columns:
+            df_features['sma_cross_signal'] = df_features['SMA_Cross_Status'].map(cross_map).fillna(0).astype(float)
+            df_features.drop(columns=['SMA_Cross_Status'], inplace=True, errors='ignore')
+        else:
+            df_features['sma_cross_signal'] = 0
+        if 'sma_trade_signal' in df_features.columns:
+            df_features['sma_trade_strength'] = df_features['sma_trade_signal'].map(sma_signal_map).fillna(0).astype(float)
+            df_features.drop(columns=['sma_trade_signal'], inplace=True, errors='ignore')
+        else:
+            df_features['sma_trade_strength'] = 0
         
         # MACD crossover signal
         if 'macd_crossover_signal' in df_features.columns:
@@ -663,6 +681,18 @@ class TradingSignalPredictor:
         
         # Drop temporary columns
         df_copy = df_copy.drop(['ema_12', 'ema_26'], axis=1)
+        
+        # SMA 100/200 from DB (or calculate fallback — matches training pipeline)
+        if 'sma_200' not in df_copy.columns or df_copy['sma_200'].isna().all():
+            df_copy['sma_200'] = df_copy.groupby('ticker')[price_col].transform(
+                lambda x: x.rolling(window=200, min_periods=1).mean()
+            )
+        if 'sma_100' not in df_copy.columns or df_copy['sma_100'].isna().all():
+            df_copy['sma_100'] = df_copy.groupby('ticker')[price_col].transform(
+                lambda x: x.rolling(window=100, min_periods=1).mean()
+            )
+        df_copy['price_vs_sma100'] = np.where(df_copy['sma_100'] > 0, df_copy[price_col] / df_copy['sma_100'], 1.0)
+        df_copy['price_vs_sma200'] = np.where(df_copy['sma_200'] > 0, df_copy[price_col] / df_copy['sma_200'], 1.0)
         
         # VECTORIZED Price vs MA ratios (safe division)
         df_copy['price_vs_sma20'] = np.where(df_copy['sma_20'] > 0, df_copy[price_col] / df_copy['sma_20'], 1.0)

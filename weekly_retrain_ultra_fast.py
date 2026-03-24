@@ -378,13 +378,13 @@ class UltraFastWeeklyRetrainer:
         except Exception as e:
             print(f"  [WARN] MACD load failed: {e}")
 
-        # SMA Signals
+        # SMA Signals (updated for new view schema — SMA_200/100/Flags removed)
         try:
             sma_query = f"""
             SELECT ticker, trading_date,
-                   CAST(SMA_200 AS FLOAT) as sma_200,
-                   CAST(SMA_100 AS FLOAT) as sma_100,
-                   SMA_200_Flag, SMA_100_Flag, SMA_50_Flag, SMA_20_Flag
+                   CAST(EMA_100 AS FLOAT) as db_ema_100,
+                   CAST(EMA_200 AS FLOAT) as db_ema_200,
+                   Trend_Status, SMA_Cross_Status, sma_trade_signal
             FROM dbo.nasdaq_100_sma_signals
             WHERE trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
             """
@@ -397,11 +397,11 @@ class UltraFastWeeklyRetrainer:
         except Exception as e:
             print(f"  [WARN] SMA Signals load failed: {e}")
 
-        # MACD Signals (crossover)
+        # MACD Signals (crossover — column renamed from MACD_Signal to macd_trade_signal)
         try:
             macd_sig_query = f"""
             SELECT ticker, trading_date,
-                   MACD_Signal as macd_crossover_signal
+                   macd_trade_signal as macd_crossover_signal
             FROM dbo.nasdaq_100_macd_signals
             WHERE trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
             """
@@ -685,15 +685,32 @@ class UltraFastWeeklyRetrainer:
         df['price_vs_sma100'] = np.where(df['sma_100'] > 0, df[price_col] / df['sma_100'], 1.0)
         df['price_vs_sma200'] = np.where(df['sma_200'] > 0, df[price_col] / df['sma_200'], 1.0)
 
-        # === SMA Flag encoding (Above/Below -> 1/-1) ===
-        sma_flag_map = {'Above': 1, 'Below': -1, 'BULLISH': 1, 'BEARISH': -1}
-        for flag_col in ['SMA_200_Flag', 'SMA_100_Flag', 'SMA_50_Flag', 'SMA_20_Flag']:
-            target_col = flag_col.lower()
-            if flag_col in df.columns:
-                df[target_col] = df[flag_col].map(sma_flag_map).fillna(0).astype(float)
-                df.drop(columns=[flag_col], inplace=True, errors='ignore')
-            else:
-                df[target_col] = 0
+        # === SMA Trend/Cross encoding (new view schema replaces old SMA_*_Flag columns) ===
+        trend_map = {
+            'STRONG_UPTREND': 2, 'UPTREND': 1, 'NEUTRAL': 0,
+            'DOWNTREND': -1, 'STRONG_DOWNTREND': -2,
+        }
+        cross_map = {
+            'GOLDEN_CROSS_ZONE': 1, 'NEUTRAL': 0, 'DEATH_CROSS_ZONE': -1,
+        }
+        sma_signal_map = {
+            'Golden Cross': 1, 'Death Cross': -1,
+        }
+        if 'Trend_Status' in df.columns:
+            df['sma_trend_strength'] = df['Trend_Status'].map(trend_map).fillna(0).astype(float)
+            df.drop(columns=['Trend_Status'], inplace=True, errors='ignore')
+        else:
+            df['sma_trend_strength'] = 0
+        if 'SMA_Cross_Status' in df.columns:
+            df['sma_cross_signal'] = df['SMA_Cross_Status'].map(cross_map).fillna(0).astype(float)
+            df.drop(columns=['SMA_Cross_Status'], inplace=True, errors='ignore')
+        else:
+            df['sma_cross_signal'] = 0
+        if 'sma_trade_signal' in df.columns:
+            df['sma_trade_strength'] = df['sma_trade_signal'].map(sma_signal_map).fillna(0).astype(float)
+            df.drop(columns=['sma_trade_signal'], inplace=True, errors='ignore')
+        else:
+            df['sma_trade_strength'] = 0
 
         # === MACD crossover signal encoding ===
         signal_strength_map = {
