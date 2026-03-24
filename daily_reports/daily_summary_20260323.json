@@ -1,6 +1,6 @@
 {
-  "date": "2026-03-23T18:42:32.420989",
-  "log_file": "logs\\daily_automation_20260323_181501.log",
+  "date": "2026-03-23T22:18:53.844722",
+  "log_file": "logs\\daily_automation_20260323_214831.log",
   "data_status": {
     "connected": true,
     "age_days": 0,
@@ -10,11 +10,11 @@
   "retraining": {
     "performed": true,
     "success": true,
-    "duration_minutes": 24.026574583333336,
+    "duration_minutes": 25.236521933333332,
     "reason": "Data is fresh (0 days old)"
   },
   "database_export": {
-    "success": false,
-    "records_inserted": 0
+    "success": true,
+    "records_inserted": 1035
   }
 }
