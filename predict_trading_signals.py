@@ -739,12 +739,21 @@ class TradingSignalPredictor:
         df_copy['bollinger_pctb'] = np.where(bb_range > 0, (df_copy[price_col] - bb_lower) / bb_range, 0.5)
         df_copy['bollinger_bandwidth'] = np.where(bb_sma > 0, bb_range / bb_sma, 0)
         
-        # --- Stochastic Oscillator (14-period) ---
+        # --- Stochastic Oscillator (14-period) — use DB values if available, else calculate ---
         low_14 = df_copy.groupby('ticker')[low_col].transform(lambda x: x.rolling(window=14, min_periods=1).min())
         high_14 = df_copy.groupby('ticker')[high_col].transform(lambda x: x.rolling(window=14, min_periods=1).max())
         stoch_range = high_14 - low_14
-        df_copy['stochastic_k'] = np.where(stoch_range > 0, (df_copy[price_col] - low_14) / stoch_range * 100, 50)
-        df_copy['stochastic_d'] = df_copy.groupby('ticker')['stochastic_k'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+        calc_k = np.where(stoch_range > 0, (df_copy[price_col] - low_14) / stoch_range * 100, 50)
+        if 'db_stoch_k' in df_copy.columns and df_copy['db_stoch_k'].notna().any():
+            df_copy['stochastic_k'] = df_copy['db_stoch_k'].fillna(pd.Series(calc_k, index=df_copy.index))
+            calc_d = df_copy.groupby('ticker')['stochastic_k'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+            df_copy['stochastic_d'] = df_copy['db_stoch_d'].fillna(calc_d) if 'db_stoch_d' in df_copy.columns else calc_d
+            df_copy['stochastic_momentum'] = df_copy['db_stoch_momentum'].fillna(0) if 'db_stoch_momentum' in df_copy.columns else 0
+            df_copy.drop(columns=['db_stoch_k', 'db_stoch_d', 'db_stoch_momentum'], inplace=True, errors='ignore')
+        else:
+            df_copy['stochastic_k'] = calc_k
+            df_copy['stochastic_d'] = df_copy.groupby('ticker')['stochastic_k'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+            df_copy['stochastic_momentum'] = df_copy['stochastic_k'] - df_copy['stochastic_d']
         
         # --- ATR (Average True Range, 14-period) ---
         prev_close = df_copy.groupby('ticker')[price_col].transform(lambda x: x.shift(1))
