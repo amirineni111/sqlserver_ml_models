@@ -190,8 +190,8 @@ def run_model_retraining():
             return False, training_time
             
     except subprocess.TimeoutExpired:
-        logging.error("⏰ Model retraining timed out after 30 minutes")
-        return False, 30.0
+        logging.error("⏰ Model retraining timed out after 60 minutes")
+        return False, 60.0
     except Exception as e:
         logging.error(f"❌ Error during model retraining: {str(e)}")
         return False, 0.0

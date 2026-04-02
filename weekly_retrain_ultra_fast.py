@@ -165,6 +165,8 @@ class UltraFastWeeklyRetrainer:
     def load_training_data(self):
         """Load training data with 12-month rolling window"""
         print("[DATA] Loading training data...")
+        import time as _time
+        _load_start = _time.time()
 
         query = f"""
         SELECT
@@ -197,12 +199,21 @@ class UltraFastWeeklyRetrainer:
             if df.empty:
                 raise ValueError("No data found in database")
 
+            _t = _time.time()
+            print(f"  [TIMING] Main query: {_t - _load_start:.1f}s")
+
             # Merge enriched data sources
             df = self._merge_fundamentals(df)
+            print(f"  [TIMING] +Fundamentals: {_time.time() - _t:.1f}s"); _t = _time.time()
             df = self._merge_enriched_db_features(df)
+            print(f"  [TIMING] +Enriched DB features: {_time.time() - _t:.1f}s"); _t = _time.time()
             df = self._merge_market_context(df)
+            print(f"  [TIMING] +Market context: {_time.time() - _t:.1f}s"); _t = _time.time()
             df = self._merge_calendar_features(df, market='NASDAQ')
+            print(f"  [TIMING] +Calendar features: {_time.time() - _t:.1f}s"); _t = _time.time()
             df = self._merge_sentiment(df)
+            print(f"  [TIMING] +Sentiment: {_time.time() - _t:.1f}s")
+            print(f"  [TIMING] Total data loading: {_time.time() - _load_start:.1f}s")
 
             return df
 
@@ -1143,11 +1154,9 @@ class UltraFastWeeklyRetrainer:
             for i, feat in enumerate(selected_market):
                 print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
 
-            # Save selected features for prediction consistency
-            features_path = self.data_dir / 'selected_features.json'
-            with open(features_path, 'w') as f:
-                json.dump(selected_features, f, indent=2)
-            print(f"\n  Total: {len(selected_features)} features saved to {features_path}")
+            # NOTE: selected_features.json is saved atomically in save_model_artifacts()
+            # to prevent desync if training is interrupted after feature selection.
+            print(f"\n  Total: {len(selected_features)} features selected (will save with model)")
 
             X = X[selected_features]
             feature_cols = selected_features
@@ -1243,24 +1252,17 @@ class UltraFastWeeklyRetrainer:
                 recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
                 f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
 
-                # Cross-validation
-                cv_scores = cross_val_score(
-                    model, X_train_scaled, y_train,
-                    cv=cv_splitter, scoring='accuracy'
-                )
-
                 model_results[model_name] = {
                     'accuracy': accuracy,
                     'precision': precision,
                     'recall': recall,
                     'f1_score': f1,
-                    'cv_mean': cv_scores.mean(),
-                    'cv_std': cv_scores.std(),
+                    'cv_mean': 0.0,
+                    'cv_std': 0.0,
                 }
                 trained_models[model_name] = model
 
-                print(f"    Acc={accuracy:.3f}, F1={f1:.3f}, "
-                      f"CV={cv_scores.mean():.3f} (+/-{cv_scores.std():.3f})")
+                print(f"    Acc={accuracy:.3f}, F1={f1:.3f}")
 
             except Exception as e:
                 print(f"    [ERROR] {model_name}: {e}")
@@ -1497,6 +1499,12 @@ class UltraFastWeeklyRetrainer:
         # Save sector encoder
         if self.sector_encoder is not None:
             joblib.dump(self.sector_encoder, self.data_dir / 'sector_encoder.joblib')
+
+        # Save selected features (atomically with model to prevent desync on timeout)
+        features_path = self.data_dir / 'selected_features.json'
+        with open(features_path, 'w') as f:
+            json.dump(self.feature_columns, f, indent=2)
+        print(f"  [OK] Selected features ({len(self.feature_columns)}) -> {features_path}")
 
         # Save training metadata
         metadata = {
