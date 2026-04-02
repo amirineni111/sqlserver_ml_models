@@ -136,6 +136,12 @@ def should_retrain(data_age_days, force_retrain=False):
     """
     Determine if model should be retrained based on data age.
     
+    Daily automation should NOT retrain — the weekly retrain schedule
+    (run_weekly_retrain_optimized.bat) handles that. Daily runs only
+    need sentiment collection + export, which takes ~5 minutes.
+    
+    Use --force-retrain to override when needed.
+    
     Args:
         data_age_days: Age of latest data in days
         force_retrain: Force retraining regardless of age
@@ -148,12 +154,8 @@ def should_retrain(data_age_days, force_retrain=False):
     if data_age_days is None:
         return False, "Unable to determine data age"
     
-    # Retrain if data is fresh (0-2 days old)
-    if data_age_days <= 2:
-        return True, f"Data is fresh ({data_age_days} days old)"
-    
-    # Don't retrain if data is older than 2 days
-    return False, f"Data is {data_age_days} days old (threshold: 2 days)"
+    # Daily automation skips retraining — weekly schedule handles it
+    return False, f"Skipping retrain (data age: {data_age_days} days). Use --force-retrain or weekly schedule."
 
 def run_model_retraining():
     """
