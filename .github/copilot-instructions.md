@@ -7,10 +7,10 @@ This is the **NASDAQ ML training pipeline** — part of a 7-repo stock trading a
 - Reads from `nasdaq_100_hist_data` (VARCHAR prices — always CAST to FLOAT)
 - Writes to `ml_trading_predictions`, `ml_prediction_summary`, `ml_technical_indicators`
 - Uses scikit-learn Gradient Boosting with 50+ engineered features → top 20 selected
-- Connected to shared database `stockdata_db` on `192.168.86.55\MSSQLSERVER01` (SQL Auth)
+- Connected to shared database `stockdata_db` on `192.168.86.28\MSSQLSERVER01` (SQL Auth)
 
 ## Key Technologies
-- **Database**: SQL Server (`stockdata_db` on `192.168.86.55\MSSQLSERVER01`, SQL Auth)
+- **Database**: SQL Server (`stockdata_db` on `192.168.86.28\MSSQLSERVER01`, SQL Auth)
 - **Language**: Python 3.11+
 - **ML Libraries**: scikit-learn, pandas, numpy, matplotlib, seaborn
 - **Database Connectivity**: pyodbc (Trusted_Connection=yes)
@@ -28,7 +28,7 @@ This is the **NASDAQ ML training pipeline** — part of a 7-repo stock trading a
 
 ## Database Notes
 - Price columns in `nasdaq_100_hist_data` are **VARCHAR** — always use `CAST(close_price AS FLOAT)`
-- Server: `192.168.86.55\MSSQLSERVER01`, DB: `stockdata_db`, Auth: SQL Auth
+- Server: `192.168.86.28\MSSQLSERVER01`, DB: `stockdata_db`, Auth: SQL Auth
 
 ## Code Guidelines
 - Use pyodbc for database connections (Windows Integrated Auth)
@@ -58,7 +58,7 @@ Configure in `.vscode/mcp.json` to query stockdata_db directly from your AI IDE:
     "type": "stdio",
     "command": "C:\\Users\\sreea\\OneDrive\\Desktop\\sqlserver_mcp\\SQL-AI-samples\\MssqlMcp\\dotnet\\MssqlMcp\\bin\\Debug\\net8.0\\MssqlMcp.exe",
     "env": {
-        "CONNECTION_STRING": "Server=192.168.86.55\\MSSQLSERVER01;Database=stockdata_db;User Id=remote_user;Password=YourStrongPassword123!;TrustServerCertificate=True"
+        "CONNECTION_STRING": "Server=192.168.86.28\\MSSQLSERVER01;Database=stockdata_db;User Id=remote_user;Password=YourStrongPassword123!;TrustServerCertificate=True"
     }
 }
 ```
