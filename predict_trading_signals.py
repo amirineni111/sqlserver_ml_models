@@ -21,6 +21,7 @@ import os
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
 from database.connection import SQLServerConnection
+from nasdaq_config import HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD
 
 warnings.filterwarnings('ignore')
 
@@ -836,7 +837,7 @@ class TradingSignalPredictor:
         
         return df_copy
     
-    def predict_signals(self, ticker=None, date=None, confidence_threshold=0.7):
+    def predict_signals(self, ticker=None, date=None, confidence_threshold=HIGH_CONFIDENCE_THRESHOLD):
         """Make trading signal predictions (ensemble, 5-day direction)"""
         # Get data (80 days lookback for technical indicator warm-up)
         df = self.get_latest_data(ticker, days_back=80)
@@ -892,11 +893,11 @@ class TradingSignalPredictor:
         output.append("=" * 80)
         # Filter high confidence predictions
         high_conf = results[results['high_confidence']]
-        medium_conf = results[(results['confidence'] > 0.6) & (results['confidence'] <= 0.7)]
-        low_conf = results[results['confidence'] <= 0.6]
+        medium_conf = results[(results['confidence'] > MEDIUM_CONFIDENCE_THRESHOLD) & (results['confidence'] <= HIGH_CONFIDENCE_THRESHOLD)]
+        low_conf = results[results['confidence'] <= MEDIUM_CONFIDENCE_THRESHOLD]
         # High confidence predictions
         if not high_conf.empty:
-            output.append("\n[UP] HIGH CONFIDENCE PREDICTIONS (>70%)")
+            output.append(f"\n[UP] HIGH CONFIDENCE PREDICTIONS (>{HIGH_CONFIDENCE_THRESHOLD:.0%})")
             output.append("-" * 50)
             for _, row in high_conf.iterrows():
                 signal_emoji = "[UP]" if row['predicted_signal'] == 'Up' else "[DOWN]"
@@ -911,7 +912,7 @@ class TradingSignalPredictor:
                 output.append("")
         # Medium confidence predictions
         if not medium_conf.empty and show_all:
-            output.append("\n[MEDIUM] MEDIUM CONFIDENCE PREDICTIONS (60-70%)")
+            output.append(f"\n[MEDIUM] MEDIUM CONFIDENCE PREDICTIONS ({MEDIUM_CONFIDENCE_THRESHOLD:.0%}-{HIGH_CONFIDENCE_THRESHOLD:.0%})")
             output.append("-" * 50)
             for _, row in medium_conf.iterrows():
                 signal_emoji = "[UP]" if row['predicted_signal'] == 'Up' else "[DOWN]"
@@ -936,7 +937,7 @@ def main():
     parser.add_argument('--ticker', type=str, help='Stock ticker symbol (e.g., AAPL)')
     parser.add_argument('--date', type=str, help='Date for prediction (YYYY-MM-DD)')
     parser.add_argument('--batch', action='store_true', help='Run batch predictions for all stocks')
-    parser.add_argument('--confidence', type=float, default=0.7, help='Confidence threshold (default: 0.7)')
+    parser.add_argument('--confidence', type=float, default=HIGH_CONFIDENCE_THRESHOLD, help=f'Confidence threshold (default: {HIGH_CONFIDENCE_THRESHOLD:.1f})')
     parser.add_argument('--show-all', action='store_true', help='Show all predictions including medium/low confidence')
     
     args = parser.parse_args()    

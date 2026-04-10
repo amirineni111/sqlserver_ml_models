@@ -100,6 +100,9 @@ Merged from shared `market_context_daily` table on `trading_date` via `_merge_ma
 | RSI | FLOAT | Current RSI value |
 | buy_probability | FLOAT | P(Buy) from model |
 | sell_probability | FLOAT | P(Sell) from model |
+| high_confidence | BIT | Flag for confidence ≥ 60% (lowered from 70% Apr 2026) |
+
+**Note on Confidence Threshold**: High-confidence threshold was lowered from 70% to 60% in April 2026 after analysis showed that calibrated models naturally output conservative probabilities. The previous 70% threshold resulted in only 50% prediction accuracy (no better than random). The 60% threshold aligns with the model's calibration and unlocks actionable signals while maintaining quality.
 
 ### Also Writes
 - `ml_prediction_summary` — Daily aggregate stats (buy/sell counts, avg confidence, trend counts)
@@ -162,7 +165,7 @@ python src/predict_daily.py --test  # Test prediction without writing
 ### Current Limitations
 - Single model (Gradient Boosting) — no ensemble
 - Binary classification only (Buy/Sell, no Hold class)
-- No confidence calibration (raw probabilities used as confidence)
+- Confidence calibration via isotonic method (CalibratedClassifierCV) — threshold adjusted to 60% in April 2026
 - No model versioning or drift detection
 - Feature selection is static (recomputed only on full retrain)
 

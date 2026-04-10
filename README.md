@@ -126,7 +126,7 @@ The system generates multiple CSV formats optimized for different use cases:
 | **Standard** | `batch_predictions_YYYYMMDD_HHMMSS.csv` | Basic predictions |
 | **Enhanced** | `predictions_enhanced_YYYYMMDD_HHMMSS.csv` | Comprehensive analysis |
 | **Trading** | `trading_signals_YYYYMMDD_HHMMSS.csv` | Optimized for trading |
-| **High Confidence** | `high_confidence_signals_YYYYMMDD_HHMMSS.csv` | >70% confidence only |
+| **High Confidence** | `high_confidence_signals_YYYYMMDD_HHMMSS.csv` | ≥60% confidence only |
 | **Summary** | `trading_signals_summary_YYYYMMDD_HHMMSS.csv` | Compact key information |
 
 ## 📈 **Current Data Status**
