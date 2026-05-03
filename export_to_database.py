@@ -210,7 +210,6 @@ class DatabaseExporter:
                 self.engine,
                 if_exists='append',
                 index=False,
-                method='multi',
                 chunksize=100
             )
             print(f"[SUCCESS] Predictions inserted into {self.predictions_table}")
@@ -221,7 +220,6 @@ class DatabaseExporter:
                 self.engine,
                 if_exists='append',
                 index=False,
-                method='multi',
                 chunksize=100
             )
             print(f"[SUCCESS] Technical indicators inserted into {self.technical_table}")
