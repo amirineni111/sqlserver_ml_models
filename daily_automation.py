@@ -203,46 +203,57 @@ def export_to_database():
     Export predictions directly to database table.
     Returns: (success, record_count)
     """
-    try:
-        logging.info("📊 Exporting predictions to database...")
-        
-        # Export to database
-        db_export_result = subprocess.run([
-            sys.executable, "export_to_database.py", "--batch"
-        ], capture_output=True, text=True, timeout=600)  # 10 minute timeout
-        
-        if db_export_result.returncode != 0:
-            if db_export_result.stdout:
-                logging.error(f"❌ Database export failed - stdout: {db_export_result.stdout}")
-            if db_export_result.stderr:
-                logging.error(f"❌ Database export failed - stderr: {db_export_result.stderr}")
-            return False, 0
-        
-        # Parse output to get record count
-        record_count = 0
-        import re
-        output_lines = db_export_result.stdout.strip().split('\n')
-        for line in output_lines:
-            if "records inserted" in line.lower() or "rows inserted" in line.lower() or "total predictions:" in line.lower():
-                try:
-                    numbers = re.findall(r'\d+', line)
-                    if numbers:
-                        record_count = int(numbers[0])
-                except:
-                    pass
-        
-        logging.info(f"✅ Database export completed successfully")
-        if record_count > 0:
-            logging.info(f"📈 Inserted {record_count:,} records to database")
-        
-        return True, record_count
+    max_retries = 2
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                logging.info(f"🔄 Retrying database export (attempt {attempt}/{max_retries})...")
+            else:
+                logging.info("📊 Exporting predictions to database...")
             
-    except subprocess.TimeoutExpired:
-        logging.error("⏰ Database export timed out")
-        return False, 0
-    except Exception as e:
-        logging.error(f"❌ Error exporting to database: {str(e)}")
-        return False, 0
+            # Export to database — allow 30 minutes for slow DB days
+            db_export_result = subprocess.run([
+                sys.executable, "export_to_database.py", "--batch"
+            ], capture_output=True, text=True, timeout=1800)  # 30 minute timeout
+            
+            if db_export_result.returncode != 0:
+                if db_export_result.stdout:
+                    logging.error(f"❌ Database export failed - stdout: {db_export_result.stdout}")
+                if db_export_result.stderr:
+                    logging.error(f"❌ Database export failed - stderr: {db_export_result.stderr}")
+                if attempt < max_retries:
+                    continue
+                return False, 0
+            
+            # Parse output to get record count
+            record_count = 0
+            import re
+            output_lines = db_export_result.stdout.strip().split('\n')
+            for line in output_lines:
+                if "records inserted" in line.lower() or "rows inserted" in line.lower() or "total predictions:" in line.lower():
+                    try:
+                        numbers = re.findall(r'\d+', line)
+                        if numbers:
+                            record_count = int(numbers[0])
+                    except:
+                        pass
+            
+            logging.info(f"✅ Database export completed successfully")
+            if record_count > 0:
+                logging.info(f"📈 Inserted {record_count:,} records to database")
+            
+            return True, record_count
+                
+        except subprocess.TimeoutExpired:
+            logging.error(f"⏰ Database export timed out (attempt {attempt}/{max_retries})")
+            if attempt < max_retries:
+                continue
+            return False, 0
+        except Exception as e:
+            logging.error(f"❌ Error exporting to database: {str(e)}")
+            if attempt < max_retries:
+                continue
+            return False, 0
 
 def run_sentiment_collection():
     """

@@ -222,7 +222,7 @@ class DatabaseExporter:
                 if_exists='append',
                 index=False,
                 method='multi',
-                chunksize=10  # Smaller chunks for complex data
+                chunksize=100
             )
             print(f"[SUCCESS] Technical indicators inserted into {self.technical_table}")
             

@@ -106,7 +106,8 @@ class SQLServerConnection:
             pool_size=int(os.getenv('SQL_POOL_SIZE', 5)),
             max_overflow=int(os.getenv('SQL_MAX_OVERFLOW', 10)),
             pool_timeout=int(os.getenv('SQL_TIMEOUT', 30)),
-            echo=os.getenv('DEBUG', 'False').lower() == 'true'
+            echo=os.getenv('DEBUG', 'False').lower() == 'true',
+            fast_executemany=True
         )
         
         return self._engine
