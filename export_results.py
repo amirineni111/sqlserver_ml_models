@@ -207,9 +207,9 @@ class ResultsExporter:
         if 'price_vs_sma50' in enhanced_df.columns:
             enhanced_df['price_vs_sma50_pct'] = ((enhanced_df['price_vs_sma50'] - 1) * 100).round(2)
         
-        # Trend analysis
-        if 'sma20_vs_sma50' in enhanced_df.columns:
-            enhanced_df['trend_direction'] = enhanced_df['sma20_vs_sma50'].apply(
+        # Trend analysis (price vs SMA50: stock price relative to its 50-day average)
+        if 'price_vs_sma50' in enhanced_df.columns:
+            enhanced_df['trend_direction'] = enhanced_df['price_vs_sma50'].apply(
                 lambda x: 'Uptrend' if x > 1.02 else 'Downtrend' if x < 0.98 else 'Sideways'
             )
         

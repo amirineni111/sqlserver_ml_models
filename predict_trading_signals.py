@@ -709,9 +709,9 @@ class TradingSignalPredictor:
         df_copy['volume_sma_20'] = df_copy.groupby('ticker')[volume_col].transform(lambda x: x.rolling(window=20, min_periods=1).mean())
         df_copy['volume_sma_ratio'] = np.where(df_copy['volume_sma_20'] > 0, df_copy[volume_col] / df_copy['volume_sma_20'], 1.0)
         
-        # VECTORIZED Momentum features
-        df_copy['price_momentum_5'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x / x.shift(5))
-        df_copy['price_momentum_10'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x / x.shift(10))
+        # VECTORIZED Momentum features (fractional returns, consistent with pct_change scale)
+        df_copy['price_momentum_5'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(5))
+        df_copy['price_momentum_10'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change(10))
         
         # VECTORIZED Volatility features
         df_copy['price_volatility_10'] = df_copy.groupby('ticker')[price_col].transform(lambda x: x.pct_change().rolling(window=10, min_periods=1).std())

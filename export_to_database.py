@@ -310,9 +310,9 @@ class DatabaseExporter:
                     axis=1
                 )
             
-            # Add trend direction analysis
-            if 'sma20_vs_sma50' in feature_data_latest.columns:
-                feature_data_latest['trend_direction'] = feature_data_latest['sma20_vs_sma50'].apply(
+            # Add trend direction analysis (price vs SMA50: stock price relative to its 50-day average)
+            if 'price_vs_sma50' in feature_data_latest.columns:
+                feature_data_latest['trend_direction'] = feature_data_latest['price_vs_sma50'].apply(
                     lambda x: 'Uptrend' if x > 1.02 else 'Downtrend' if x < 0.98 else 'Sideways'
                 )
             

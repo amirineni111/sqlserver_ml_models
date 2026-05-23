@@ -668,9 +668,9 @@ class ModelRetrainer:
         df['volume_sma_20'] = df[volume_col].rolling(window=20).mean()
         df['volume_sma_ratio'] = df[volume_col] / df['volume_sma_20']
         
-        # Price momentum features
-        df['price_momentum_5'] = df[price_col] / df[price_col].shift(5)
-        df['price_momentum_10'] = df[price_col] / df[price_col].shift(10)
+        # Price momentum features (fractional returns, consistent with pct_change scale)
+        df['price_momentum_5'] = df[price_col].pct_change(5)
+        df['price_momentum_10'] = df[price_col].pct_change(10)
         
         # Volatility features
         df['price_volatility_10'] = df[price_col].pct_change().rolling(window=10).std()
