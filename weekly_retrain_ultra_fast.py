@@ -185,7 +185,7 @@ class UltraFastWeeklyRetrainer:
         WHERE h.trading_date >= DATEADD(DAY, -{self.days_back}, CAST(GETDATE() AS DATE))
           AND h.trading_date <= CAST(GETDATE() AS DATE)
           AND ISNUMERIC(h.close_price) = 1
-          AND CAST(h.close_price AS FLOAT) > 0
+          AND CAST(h.close_price AS FLOAT) >= 5.0
           AND CAST(h.volume AS BIGINT) > 0
         ORDER BY h.ticker, h.trading_date
         """

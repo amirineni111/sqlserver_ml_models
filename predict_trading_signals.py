@@ -24,7 +24,8 @@ from database.connection import SQLServerConnection
 from nasdaq_config import (
     HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD,
     BUY_MIN_CONFIDENCE, SELL_MAX_CONFIDENCE,
-    RSI_OVERBOUGHT_BUY_BLOCK, ENERGY_SECTOR_EXCLUDED
+    RSI_OVERBOUGHT_BUY_BLOCK, ENERGY_SECTOR_EXCLUDED,
+    MIN_STOCK_PRICE, SECTOR_CONFIDENCE_OVERRIDES
 )
 
 warnings.filterwarnings('ignore')
@@ -160,6 +161,9 @@ class TradingSignalPredictor:
         INNER JOIN dbo.nasdaq_100_rsi_signals r 
             ON h.ticker = r.ticker AND h.trading_date = r.trading_date
         WHERE h.trading_date >= DATEADD(day, -{days_back}, CAST(GETDATE() AS DATE))
+            AND ISNUMERIC(h.close_price) = 1
+            AND CAST(h.close_price AS FLOAT) >= {MIN_STOCK_PRICE}
+            AND CAST(h.volume AS BIGINT) > 0
             {ticker_filter}
         ORDER BY h.trading_date DESC, h.ticker
         """
@@ -894,6 +898,8 @@ class TradingSignalPredictor:
         """Suppress signals identified as systematically unreliable.
 
         Rules (applied in order, all based on May 2026 accuracy analysis):
+        0. Penny stock filter: close_price < MIN_STOCK_PRICE ($5). Defense-in-depth
+           after SQL-layer filter. Buy acc below $5: 41.9-46.2% vs 48.8% above $10.
         1. Buy dead-zone: Buy @ 55-65% confidence has 34-48% accuracy — worse than random.
            Only Buy signals >= BUY_MIN_CONFIDENCE (67%) are reliable.
         2. Sell inverted calibration: High-confidence Sell signals are LESS accurate.
@@ -903,12 +909,22 @@ class TradingSignalPredictor:
            Hard override: suppress Buy when RSI > RSI_OVERBOUGHT_BUY_BLOCK.
         4. Energy sector exclusion: Energy stocks have 39.3% 1-day accuracy.
            Commodity/geopolitical drivers not in feature set.
+        5. Sector confidence overrides: near-random sectors (Technology 49.9%,
+           Healthcare 49.4%) require higher confidence thresholds for Buy signals.
         """
         if results is None or results.empty:
             return results
 
         initial_count = len(results)
         suppressed = {}
+
+        # Rule 0: Penny stock price floor (defense-in-depth after SQL filter)
+        if 'close_price' in results.columns:
+            penny_mask = results['close_price'] < MIN_STOCK_PRICE
+            suppressed['penny_stock'] = penny_mask.sum()
+            results = results[~penny_mask].copy()
+        else:
+            suppressed['penny_stock'] = 0
 
         # Rule 1: Buy dead-zone filter
         buy_dead_zone_mask = (
@@ -943,14 +959,30 @@ class TradingSignalPredictor:
             results = results[~energy_mask].copy()
         suppressed['energy_sector'] = energy_suppressed
 
+        # Rule 5: Sector-specific confidence overrides for near-random sectors.
+        # Tech (49.9% acc) and Healthcare (49.4% acc) require higher confidence threshold.
+        sector_override_suppressed = 0
+        if SECTOR_CONFIDENCE_OVERRIDES and 'sector' in results.columns:
+            for sector_name, sector_threshold in SECTOR_CONFIDENCE_OVERRIDES.items():
+                sector_buy_mask = (
+                    (results['predicted_signal'] == 'Up') &
+                    (results['sector'] == sector_name) &
+                    (results['confidence'] < sector_threshold)
+                )
+                sector_override_suppressed += sector_buy_mask.sum()
+                results = results[~sector_buy_mask].copy()
+        suppressed['sector_override'] = sector_override_suppressed
+
         total_suppressed = initial_count - len(results)
         if total_suppressed > 0:
             safe_print(
                 f"[FILTER] Reliability filters suppressed {total_suppressed}/{initial_count} signals: "
+                f"penny_stock={suppressed['penny_stock']}, "
                 f"buy_dead_zone={suppressed['buy_dead_zone']}, "
                 f"sell_high_conf={suppressed['sell_high_confidence']}, "
                 f"rsi_overbought_buy={suppressed['rsi_overbought_buy']}, "
-                f"energy_sector={suppressed['energy_sector']}"
+                f"energy_sector={suppressed['energy_sector']}, "
+                f"sector_override={suppressed['sector_override']}"
             )
 
         return results

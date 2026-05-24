@@ -190,6 +190,9 @@ class ModelRetrainer:
         INNER JOIN dbo.nasdaq_100_rsi_signals r 
             ON h.ticker = r.ticker AND h.trading_date = r.trading_date
         {date_filter}
+          AND ISNUMERIC(h.close_price) = 1
+          AND CAST(h.close_price AS FLOAT) >= 5.0
+          AND CAST(h.volume AS BIGINT) > 0
         ORDER BY h.trading_date DESC, h.ticker
         """
         
