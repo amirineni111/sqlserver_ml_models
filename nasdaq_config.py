@@ -27,6 +27,30 @@ MEDIUM_CONFIDENCE_THRESHOLD = float(os.getenv('MEDIUM_CONFIDENCE_THRESHOLD', '0.
 # Low confidence threshold (below MEDIUM_CONFIDENCE_THRESHOLD)
 # Signals below 55% are flagged as low confidence
 
+# ============================================================================
+# SIGNAL RELIABILITY FILTERS
+# ============================================================================
+# Applied post-prediction to suppress signals identified as systematically
+# unreliable from accuracy analysis (May 2026):
+
+# BUY dead-zone fix: Buy signals at 55-65% confidence are inversely correlated
+# with accuracy (34-48% acc). Only Buy signals >= 67% are reliable (67-83% acc).
+BUY_MIN_CONFIDENCE = float(os.getenv('BUY_MIN_CONFIDENCE', '0.67'))
+
+# SELL inverted calibration fix: High-confidence Sell signals are LESS accurate
+# than low-confidence ones (70% confidence = 43% acc vs 50-54% confidence = 53-57%).
+# Short-term filter: only emit Sell signals at confidence <= 55%.
+# Long-term fix: recalibrate sell probabilities (requires model retrain).
+SELL_MAX_CONFIDENCE = float(os.getenv('SELL_MAX_CONFIDENCE', '0.55'))
+
+# RSI overbought Buy block: Buying overbought stocks (RSI > 70) loses 58% of the time.
+# Hard rule: suppress any Buy signal where RSI > this threshold.
+RSI_OVERBOUGHT_BUY_BLOCK = float(os.getenv('RSI_OVERBOUGHT_BUY_BLOCK', '70'))
+
+# Energy sector exclusion: Energy stocks have 39.3% 1-day accuracy (worse than random).
+# Commodity/geopolitical drivers not in feature set. Set to False to re-enable.
+ENERGY_SECTOR_EXCLUDED = os.getenv('ENERGY_SECTOR_EXCLUDED', 'true').lower() == 'true'
+
 
 # ============================================================================
 # MODEL PARAMETERS
@@ -67,6 +91,12 @@ if not (0.0 <= MEDIUM_CONFIDENCE_THRESHOLD <= HIGH_CONFIDENCE_THRESHOLD):
 if not (0.0 <= MIN_PREDICTION_CONFIDENCE <= 1.0):
     raise ValueError(f"MIN_PREDICTION_CONFIDENCE must be between 0 and 1, got {MIN_PREDICTION_CONFIDENCE}")
 
+if not (0.0 <= BUY_MIN_CONFIDENCE <= 1.0):
+    raise ValueError(f"BUY_MIN_CONFIDENCE must be between 0 and 1, got {BUY_MIN_CONFIDENCE}")
+
+if not (0.0 <= SELL_MAX_CONFIDENCE <= 1.0):
+    raise ValueError(f"SELL_MAX_CONFIDENCE must be between 0 and 1, got {SELL_MAX_CONFIDENCE}")
+
 
 # ============================================================================
 # CONFIGURATION SUMMARY (for logging)
@@ -84,6 +114,11 @@ def print_config():
     print(f"Model Accuracy Threshold:     {MIN_MODEL_ACCURACY:.0%}")
     print(f"Live Accuracy Threshold:      {MIN_LIVE_ACCURACY:.0%}")
     print(f"Historical Days:              {HISTORICAL_DAYS}")
+    print(f"--- Reliability Filters ---")
+    print(f"Buy Min Confidence:           {BUY_MIN_CONFIDENCE:.0%} (dead-zone suppression)")
+    print(f"Sell Max Confidence:          {SELL_MAX_CONFIDENCE:.0%} (inverted calibration filter)")
+    print(f"RSI Overbought Buy Block:     RSI > {RSI_OVERBOUGHT_BUY_BLOCK:.0f}")
+    print(f"Energy Sector Excluded:       {ENERGY_SECTOR_EXCLUDED}")
     print(f"Indicator Lookback Days:      {INDICATOR_LOOKBACK_DAYS}")
     print("=" * 80)
     print("Model has isotonic calibration (CalibratedClassifierCV)")

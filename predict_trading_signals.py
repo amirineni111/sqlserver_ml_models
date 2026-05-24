@@ -21,7 +21,11 @@ import os
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
 from database.connection import SQLServerConnection
-from nasdaq_config import HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD
+from nasdaq_config import (
+    HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD,
+    BUY_MIN_CONFIDENCE, SELL_MAX_CONFIDENCE,
+    RSI_OVERBOUGHT_BUY_BLOCK, ENERGY_SECTOR_EXCLUDED
+)
 
 warnings.filterwarnings('ignore')
 
@@ -867,7 +871,8 @@ class TradingSignalPredictor:
         predictions = self.model.predict(X_scaled)
         probabilities = self.model.predict_proba(X_scaled)
         # Create results DataFrame
-        results = latest_data[['trading_date', 'ticker', 'company', 'close_price', 'RSI']].copy()
+        sector_cols = ['sector'] if 'sector' in latest_data.columns else []
+        results = latest_data[['trading_date', 'ticker', 'company', 'close_price', 'RSI'] + sector_cols].copy()
         results['predicted_signal'] = self.target_encoder.inverse_transform(predictions)
         results['confidence'] = probabilities.max(axis=1)
         # Up/Down probabilities (class order from encoder)
@@ -881,8 +886,75 @@ class TradingSignalPredictor:
             results['down_probability'] = np.nan
         # Add confidence flag
         results['high_confidence'] = results['confidence'] > confidence_threshold
+        # Apply reliability filters to suppress systematically inaccurate signals
+        results = self._apply_reliability_filters(results)
         return results
-    
+
+    def _apply_reliability_filters(self, results: pd.DataFrame) -> pd.DataFrame:
+        """Suppress signals identified as systematically unreliable.
+
+        Rules (applied in order, all based on May 2026 accuracy analysis):
+        1. Buy dead-zone: Buy @ 55-65% confidence has 34-48% accuracy — worse than random.
+           Only Buy signals >= BUY_MIN_CONFIDENCE (67%) are reliable.
+        2. Sell inverted calibration: High-confidence Sell signals are LESS accurate.
+           Sell @ 70% confidence = 43% acc vs Sell @ 50-54% = 53-57% acc.
+           Suppress Sell signals above SELL_MAX_CONFIDENCE (55%) until recalibration.
+        3. RSI overbought Buy block: Buy + RSI > 70 loses 58% of the time.
+           Hard override: suppress Buy when RSI > RSI_OVERBOUGHT_BUY_BLOCK.
+        4. Energy sector exclusion: Energy stocks have 39.3% 1-day accuracy.
+           Commodity/geopolitical drivers not in feature set.
+        """
+        if results is None or results.empty:
+            return results
+
+        initial_count = len(results)
+        suppressed = {}
+
+        # Rule 1: Buy dead-zone filter
+        buy_dead_zone_mask = (
+            (results['predicted_signal'] == 'Up') &
+            (results['confidence'] < BUY_MIN_CONFIDENCE)
+        )
+        suppressed['buy_dead_zone'] = buy_dead_zone_mask.sum()
+        results = results[~buy_dead_zone_mask].copy()
+
+        # Rule 2: Sell inverted calibration filter
+        sell_high_conf_mask = (
+            (results['predicted_signal'] == 'Down') &
+            (results['confidence'] > SELL_MAX_CONFIDENCE)
+        )
+        suppressed['sell_high_confidence'] = sell_high_conf_mask.sum()
+        results = results[~sell_high_conf_mask].copy()
+
+        # Rule 3: RSI overbought Buy block
+        rsi_block_mask = (
+            (results['predicted_signal'] == 'Up') &
+            (results['RSI'].notna()) &
+            (results['RSI'] > RSI_OVERBOUGHT_BUY_BLOCK)
+        )
+        suppressed['rsi_overbought_buy'] = rsi_block_mask.sum()
+        results = results[~rsi_block_mask].copy()
+
+        # Rule 4: Energy sector exclusion
+        energy_suppressed = 0
+        if ENERGY_SECTOR_EXCLUDED and 'sector' in results.columns:
+            energy_mask = results['sector'] == 'Energy'
+            energy_suppressed = energy_mask.sum()
+            results = results[~energy_mask].copy()
+        suppressed['energy_sector'] = energy_suppressed
+
+        total_suppressed = initial_count - len(results)
+        if total_suppressed > 0:
+            safe_print(
+                f"[FILTER] Reliability filters suppressed {total_suppressed}/{initial_count} signals: "
+                f"buy_dead_zone={suppressed['buy_dead_zone']}, "
+                f"sell_high_conf={suppressed['sell_high_confidence']}, "
+                f"rsi_overbought_buy={suppressed['rsi_overbought_buy']}, "
+                f"energy_sector={suppressed['energy_sector']}"
+            )
+
+        return results
+
     def format_prediction_output(self, results, show_all=False):
         """Format prediction results for display (Up/Down signals)"""
         if results is None or results.empty:

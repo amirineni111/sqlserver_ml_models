@@ -253,12 +253,12 @@ class DatabaseExporter:
         
         # Add calculated fields
         df['confidence_percentage'] = (df['confidence'] * 100).round(1)
-        # Thresholds aligned with calibrated model performance:
-        # Strong >= 65% (calibration shows 67-75% accuracy at this level)
-        # Moderate >= 55% (above random chance, actionable with caution)
-        # Weak < 55% (near coin-flip, not actionable)
+        # Thresholds aligned with filtered signal distribution (May 2026):
+        # Strong >= 67% (effective Buy floor after dead-zone suppression)
+        # Moderate >= 55% (transition zone; no Sell signals survive above this)
+        # Weak < 55% (where all surviving Sell signals land: 50-55% confidence)
         df['signal_strength'] = df['confidence'].apply(
-            lambda x: 'Strong' if x >= 0.65 else 'Moderate' if x >= 0.55 else 'Weak'
+            lambda x: 'Strong' if x >= 0.67 else 'Moderate' if x >= 0.55 else 'Weak'
         )
         df['rsi_category'] = df['RSI'].apply(
             lambda x: 'Oversold' if x < 30 else 'Overbought' if x > 70 else 'Neutral'

@@ -1058,12 +1058,14 @@ class ModelRetrainer:
         best_model = trained_models[best_model_name]
         
         # Calibrate probabilities using dedicated calibration set (NOT test set)
-        # Using isotonic regression which is more flexible than sigmoid (Platt scaling)
-        # and works better when we have enough calibration data (20% of dataset)
+        # Switching to sigmoid (Platt scaling) from isotonic regression:
+        # Analysis shows sell probability output is inversely correlated with sell accuracy
+        # (high-confidence sells are LESS accurate than low-confidence sells), which indicates
+        # monotonicity violations that sigmoid handles better than isotonic on sell-side.
         print("[CONFIG] Calibrating model probabilities on held-out calibration set...")
         try:
             calibrated_model = CalibratedClassifierCV(
-                estimator=best_model, cv='prefit', method='isotonic'
+                estimator=best_model, cv='prefit', method='sigmoid'
             )
             calibrated_model.fit(X_cal_scaled, y_cal)
             
@@ -1089,6 +1091,20 @@ class ModelRetrainer:
                     print("[SUCCESS] Calibration confirmed: high confidence = higher accuracy")
                 else:
                     print("[WARN] Calibration check: high confidence NOT more accurate - review needed")
+
+            # Sell-class calibration validation: verify sell accuracy is not inversely
+            # correlated with confidence after sigmoid recalibration.
+            # (Pre-fix with isotonic: Sell@70% = 43% acc, Sell@50-54% = 53-57% acc)
+            down_class_idx = np.where(calibrated_model.classes_ == 'Down')[0]
+            if len(down_class_idx) == 1:
+                sell_probs = cal_probs[:, down_class_idx[0]]
+                sell_true = (y_test == 'Down')
+                for lo, hi in [(0.50, 0.55), (0.55, 0.60), (0.60, 0.70), (0.70, 1.01)]:
+                    band_mask = (sell_probs >= lo) & (sell_probs < hi)
+                    if band_mask.sum() > 10:
+                        band_preds = cal_preds[band_mask]
+                        band_acc = (sell_true[band_mask] & (band_preds == 'Down')).sum() / max(band_mask.sum(), 1)
+                        print(f"  Sell accuracy @ {lo:.0%}-{min(hi,1.0):.0%} confidence: {band_acc:.3f} ({band_mask.sum()} samples)")
             
             best_model = calibrated_model
             print("[SUCCESS] Probability calibration applied successfully")
