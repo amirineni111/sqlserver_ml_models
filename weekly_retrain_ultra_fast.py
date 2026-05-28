@@ -48,8 +48,10 @@ from sklearn.metrics import (
     mean_absolute_error, mean_squared_error, r2_score
 )
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.utils.class_weight import compute_sample_weight
+from model_calibration import IsotonicCalibratedClassifier
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
@@ -86,6 +88,7 @@ class PurgedTimeSeriesSplit:
 
     def get_n_splits(self, X=None, y=None, groups=None):
         return self.n_splits
+
 
 
 class UltraFastWeeklyRetrainer:
@@ -1014,6 +1017,84 @@ class UltraFastWeeklyRetrainer:
             df['sector_etf_return_1d'] = 0
 
         # ================================================================
+        # RELATIVE ALPHA FEATURES (stock vs market/sector/peers)
+        # Prevents macro feature dominance by giving the model a way to
+        # identify stocks outperforming the market even on weak macro days.
+        # ================================================================
+        print("[FEATURES] Adding relative alpha features...")
+
+        # 5d and 20d stock returns
+        stock_ret_5d = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(5))
+        stock_ret_20d = df.groupby('ticker')[price_col].transform(lambda x: x.pct_change(20))
+
+        # Market cumulative returns (per unique date, then mapped back to all rows)
+        if 'nasdaq_comp_return_1d' in df.columns:
+            _date_idx = (
+                df.drop_duplicates('trading_date')
+                .set_index('trading_date')['nasdaq_comp_return_1d']
+                .sort_index()
+            )
+            _nasdaq_5d = _date_idx.rolling(5, min_periods=1).sum()
+            _nasdaq_20d = _date_idx.rolling(20, min_periods=1).sum()
+            df['_mkt_5d'] = df['trading_date'].map(_nasdaq_5d)
+            df['_mkt_20d'] = df['trading_date'].map(_nasdaq_20d)
+        else:
+            df['_mkt_5d'] = 0
+            df['_mkt_20d'] = 0
+
+        df['alpha_vs_nasdaq_5d'] = stock_ret_5d - df['_mkt_5d']
+        df['alpha_vs_nasdaq_20d'] = stock_ret_20d - df['_mkt_20d']
+
+        # Alpha vs sector ETF (sector_etf_return_1d mapped in previous step)
+        if 'sector_etf_return_1d' in df.columns:
+            _sector_5d = df.groupby('ticker')['sector_etf_return_1d'].transform(
+                lambda x: x.rolling(5, min_periods=1).sum()
+            )
+            df['alpha_vs_sector_5d'] = stock_ret_5d - _sector_5d
+        else:
+            df['alpha_vs_sector_5d'] = 0
+
+        df.drop(columns=['_mkt_5d', '_mkt_20d'], inplace=True, errors='ignore')
+
+        # 52-week relative strength rank vs NASDAQ 100 peers on same date
+        if 'price_vs_52wk_high' in df.columns:
+            df['rs_rank_52wk'] = df.groupby('trading_date')['price_vs_52wk_high'].transform(
+                lambda x: x.rank(pct=True, na_option='bottom')
+            )
+        else:
+            df['rs_rank_52wk'] = 0.5
+
+        # Fundamental quality score: cross-sectional z-score composite
+        _quality_cols = []
+        for _qcol in ['return_on_equity', 'profit_margin', 'current_ratio']:
+            if _qcol in df.columns:
+                _mu, _sd = df[_qcol].mean(), df[_qcol].std()
+                _z = f'_z_{_qcol}'
+                df[_z] = (df[_qcol] - _mu) / (_sd + 1e-9)
+                _quality_cols.append(_z)
+        if _quality_cols:
+            df['fundamental_quality_score'] = df[_quality_cols].sum(axis=1)
+            df.drop(columns=_quality_cols, inplace=True, errors='ignore')
+        else:
+            df['fundamental_quality_score'] = 0
+
+        # PE vs sector median (relative valuation: < 1.0 = undervalued vs peers)
+        if 'forward_pe' in df.columns and 'sector' in df.columns:
+            _sec_pe = df.groupby('sector')['forward_pe'].transform(
+                lambda x: x.replace(0, np.nan).median()
+            )
+            df['pe_vs_sector_median'] = np.where(
+                (_sec_pe > 0) & (df['forward_pe'] > 0),
+                df['forward_pe'] / _sec_pe,
+                1.0
+            )
+        else:
+            df['pe_vs_sector_median'] = 1.0
+
+        print(f"  Alpha features added: alpha_vs_nasdaq_5d/20d, alpha_vs_sector_5d, "
+              f"rs_rank_52wk, fundamental_quality_score, pe_vs_sector_median")
+
+        # ================================================================
         # SENTIMENT-PRICE DIVERGENCE
         # Detects when sentiment is negative but price looks bullish (or vice versa)
         # Key signal for catching sector-wide downturns the model might miss.
@@ -1056,7 +1137,7 @@ class UltraFastWeeklyRetrainer:
 
         # Handle infinite values and NaN — forward fill only (no bfill to prevent leakage)
         df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.fillna(method='ffill').fillna(0)
+        df = df.ffill().fillna(0)
 
         print(f"[FEATURES] Complete — {df.shape[1]} columns, {df.shape[0]:,} rows")
         return df
@@ -1140,9 +1221,10 @@ class UltraFastWeeklyRetrainer:
             mi_market = mi_all[mi_all.index.isin(market_features)].sort_values(ascending=False)
             mi_stock = mi_all[mi_all.index.isin(stock_features)].sort_values(ascending=False)
 
-            # Stratified selection: top-8 market + top-22 stock = 30 features
+            # Stratified selection: top-8 market + top-25 stock = 33 features
+            # n_stock raised from 22 to 25 to give room for the new alpha features
             n_market = min(8, len(mi_market))
-            n_stock = min(22, len(mi_stock))
+            n_stock = min(25, len(mi_stock))
             selected_market = mi_market.head(n_market).index.tolist()
             selected_stock = mi_stock.head(n_stock).index.tolist()
             selected_features = selected_stock + selected_market  # stock-specific first
@@ -1304,13 +1386,18 @@ class UltraFastWeeklyRetrainer:
               f"(F1={model_results[best_model_name]['f1_score']:.3f}, "
               f"Acc={model_results[best_model_name]['accuracy']:.1%})")
 
-        # Calibrate probabilities on calibration set
+        # Calibrate probabilities on calibration set using isotonic regression
+        # (Replaces CalibratedClassifierCV(cv='prefit') removed in sklearn 1.6+)
         print("[CALIBRATE] Calibrating model probabilities on held-out calibration set...")
         try:
-            calibrated_model = CalibratedClassifierCV(
-                estimator=best_model, cv='prefit', method='isotonic'
+            raw_probs_cal = best_model.predict_proba(X_cal_scaled)[:, 1]
+            iso_reg = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip')
+            iso_reg.fit(raw_probs_cal, y_cal)
+            calibrated_model = IsotonicCalibratedClassifier(
+                base_model=best_model,
+                calibrator=iso_reg,
+                classes=best_model.classes_
             )
-            calibrated_model.fit(X_cal_scaled, y_cal)
 
             cal_preds = calibrated_model.predict(X_test_scaled)
             cal_probs = calibrated_model.predict_proba(X_test_scaled)

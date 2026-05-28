@@ -17,6 +17,7 @@ import warnings
 from datetime import datetime, timedelta
 import sys
 import os
+from model_calibration import IsotonicCalibratedClassifier  # noqa: F401 — ensures joblib can deserialize calibrated models
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
@@ -146,7 +147,7 @@ class TradingSignalPredictor:
             ticker_filter = ""
         
         query = f"""
-        SELECT TOP 10000
+        SELECT
             h.trading_date,
             h.ticker,
             h.company,
@@ -165,7 +166,7 @@ class TradingSignalPredictor:
             AND CAST(h.close_price AS FLOAT) >= {MIN_STOCK_PRICE}
             AND CAST(h.volume AS BIGINT) > 0
             {ticker_filter}
-        ORDER BY h.trading_date DESC, h.ticker
+        ORDER BY h.ticker, h.trading_date
         """
         
         try:
@@ -639,6 +640,90 @@ class TradingSignalPredictor:
             )
         
         # ================================================================
+        # PHASE 7: Relative alpha features (stock vs market/sector/peers)
+        # These features let the model identify stocks that outperform
+        # even on macro-weak days, preventing macro feature dominance.
+        # ================================================================
+        price_col_fe = 'close_price'
+
+        # 5-day and 20-day stock returns (as decimal fraction)
+        stock_ret_5d = df_features.groupby('ticker')[price_col_fe].transform(
+            lambda x: x.pct_change(5)
+        )
+        stock_ret_20d = df_features.groupby('ticker')[price_col_fe].transform(
+            lambda x: x.pct_change(20)
+        )
+
+        # Market 5d / 20d cumulative return: rolling sum of NASDAQ daily returns per date,
+        # then mapped back to all rows. This keeps the computation market-wide (not per-ticker).
+        if 'nasdaq_comp_return_1d' in df_features.columns:
+            date_idx = (
+                df_features.drop_duplicates('trading_date')
+                .set_index('trading_date')['nasdaq_comp_return_1d']
+                .sort_index()
+            )
+            nasdaq_5d_series = date_idx.rolling(5, min_periods=1).sum()
+            nasdaq_20d_series = date_idx.rolling(20, min_periods=1).sum()
+            df_features['_mkt_5d'] = df_features['trading_date'].map(nasdaq_5d_series)
+            df_features['_mkt_20d'] = df_features['trading_date'].map(nasdaq_20d_series)
+        else:
+            df_features['_mkt_5d'] = 0
+            df_features['_mkt_20d'] = 0
+
+        df_features['alpha_vs_nasdaq_5d'] = stock_ret_5d - df_features['_mkt_5d']
+        df_features['alpha_vs_nasdaq_20d'] = stock_ret_20d - df_features['_mkt_20d']
+
+        # Alpha vs sector ETF (uses already-mapped sector_etf_return_1d daily returns)
+        if 'sector_etf_return_1d' in df_features.columns:
+            df_features['_sector_5d'] = df_features.groupby('ticker')[
+                'sector_etf_return_1d'
+            ].transform(lambda x: x.rolling(5, min_periods=1).sum())
+            df_features['alpha_vs_sector_5d'] = stock_ret_5d - df_features['_sector_5d']
+            df_features.drop(columns=['_sector_5d'], inplace=True, errors='ignore')
+        else:
+            df_features['alpha_vs_sector_5d'] = 0
+
+        df_features.drop(columns=['_mkt_5d', '_mkt_20d'], inplace=True, errors='ignore')
+
+        # 52-week relative strength rank vs NASDAQ 100 peers on the same date
+        # Uses price_vs_52wk_high (close/52-week-high) — higher = closer to 52wk high = stronger
+        if 'price_vs_52wk_high' in df_features.columns:
+            df_features['rs_rank_52wk'] = df_features.groupby('trading_date')[
+                'price_vs_52wk_high'
+            ].transform(lambda x: x.rank(pct=True, na_option='bottom'))
+        else:
+            df_features['rs_rank_52wk'] = 0.5
+
+        # Fundamental quality score: cross-sectional z-score composite of ROE,
+        # profit_margin, and current_ratio. Positive = above-average fundamentals.
+        _quality_cols = []
+        for _qcol in ['return_on_equity', 'profit_margin', 'current_ratio']:
+            if _qcol in df_features.columns:
+                _mu = df_features[_qcol].mean()
+                _sd = df_features[_qcol].std()
+                _z = f'_z_{_qcol}'
+                df_features[_z] = (df_features[_qcol] - _mu) / (_sd + 1e-9)
+                _quality_cols.append(_z)
+        if _quality_cols:
+            df_features['fundamental_quality_score'] = df_features[_quality_cols].sum(axis=1)
+            df_features.drop(columns=_quality_cols, inplace=True, errors='ignore')
+        else:
+            df_features['fundamental_quality_score'] = 0
+
+        # PE vs sector median (relative valuation: < 1.0 = undervalued vs sector peers)
+        if 'forward_pe' in df_features.columns and 'sector' in df_features.columns:
+            _sec_pe = df_features.groupby('sector')['forward_pe'].transform(
+                lambda x: x.replace(0, np.nan).median()
+            )
+            df_features['pe_vs_sector_median'] = np.where(
+                (_sec_pe > 0) & (df_features['forward_pe'] > 0),
+                df_features['forward_pe'] / _sec_pe,
+                1.0
+            )
+        else:
+            df_features['pe_vs_sector_median'] = 1.0
+
+        # ================================================================
         # PHASE 6: Sentiment-price divergence
         # Detects when sentiment and price direction disagree.
         # ================================================================
@@ -658,7 +743,7 @@ class TradingSignalPredictor:
             df_features['sentiment_price_divergence'] = 0
         
         # Handle NaN values - use FORWARD fill only (bfill causes data leakage in time series)
-        df_features = df_features.fillna(method='ffill').fillna(0)
+        df_features = df_features.ffill().fillna(0)
         
         return df_features
     
