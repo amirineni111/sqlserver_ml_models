@@ -17,7 +17,7 @@ import warnings
 from datetime import datetime, timedelta
 import sys
 import os
-from model_calibration import IsotonicCalibratedClassifier  # noqa: F401 — ensures joblib can deserialize calibrated models
+from model_calibration import IsotonicCalibratedClassifier, SigmoidCalibratedClassifier  # noqa: F401 — ensures joblib can deserialize calibrated models
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))

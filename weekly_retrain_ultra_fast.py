@@ -38,7 +38,8 @@ from sklearn.ensemble import (
     GradientBoostingClassifier, RandomForestClassifier,
     ExtraTreesClassifier, VotingClassifier,
     GradientBoostingRegressor, RandomForestRegressor,
-    ExtraTreesRegressor, VotingRegressor
+    ExtraTreesRegressor, VotingRegressor,
+    HistGradientBoostingClassifier
 )
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -51,7 +52,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.utils.class_weight import compute_sample_weight
-from model_calibration import IsotonicCalibratedClassifier
+from model_calibration import IsotonicCalibratedClassifier, SigmoidCalibratedClassifier  # noqa: F401 — Isotonic kept for joblib backward compat
+from nasdaq_config import LABEL_DEAD_ZONE_PCT
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
@@ -1135,9 +1137,13 @@ class UltraFastWeeklyRetrainer:
                      ]
         df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True, errors='ignore')
 
-        # Handle infinite values and NaN — forward fill only (no bfill to prevent leakage)
+        # Handle infinite values and NaN — forward fill only (no bfill to prevent
+        # leakage), per ticker so one ticker's trailing values never bleed into
+        # the next ticker's leading rows (df is sorted ticker, trading_date)
         df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.ffill().fillna(0)
+        fill_cols = [c for c in df.columns if c != 'ticker']
+        df[fill_cols] = df.groupby('ticker', sort=False)[fill_cols].ffill()
+        df = df.fillna(0)
 
         print(f"[FEATURES] Complete — {df.shape[1]} columns, {df.shape[0]:,} rows")
         return df
@@ -1163,12 +1169,24 @@ class UltraFastWeeklyRetrainer:
         X = df_features[feature_cols].copy()
         y_direction = df_features[target_column].copy()
         y_return = df_features['next_5d_return'].copy()
+        dates = pd.to_datetime(df_features['trading_date']).copy()
 
         # Remove any remaining NaN rows
         valid_mask = X.notna().all(axis=1) & y_direction.notna() & y_return.notna()
         X = X[valid_mask]
         y_direction = y_direction[valid_mask]
         y_return = y_return[valid_mask]
+        dates = dates[valid_mask]
+
+        # Sort globally by trading date (stable sort keeps ticker order within
+        # a day). The data arrives sorted by (ticker, date); splitting that
+        # positionally would put the SAME calendar dates in train and test,
+        # leaking market-wide features (VIX, index returns) across splits.
+        order = np.argsort(dates.values, kind='mergesort')
+        X = X.iloc[order]
+        y_direction = y_direction.iloc[order]
+        y_return = y_return.iloc[order]
+        dates = dates.iloc[order]
 
         # Encode target
         direction_encoder = LabelEncoder()
@@ -1214,8 +1232,15 @@ class UltraFastWeeklyRetrainer:
             print(f"  Market-wide features: {len(market_features)}")
             print(f"  Stock-specific features: {len(stock_features)}")
 
-            # Compute MI scores for both groups separately
-            mi_scores_all = mutual_info_classif(X, y_direction_encoded, random_state=42)
+            # Compute MI scores on the TRAIN slice only — scoring on the full
+            # dataset would let the selector see test-period feature-target
+            # relationships and pick regime-specific noise.
+            train_mask, _, _ = self._time_split_masks(dates)
+            print(f"  Scoring features on train slice only: {int(train_mask.sum()):,} rows "
+                  f"(through {dates.values[train_mask].max().astype('datetime64[D]')})")
+            mi_scores_all = mutual_info_classif(
+                X[train_mask], y_direction_encoded[train_mask], random_state=42
+            )
             mi_all = pd.Series(mi_scores_all, index=feature_cols).sort_values(ascending=False)
 
             mi_market = mi_all[mi_all.index.isin(market_features)].sort_values(ascending=False)
@@ -1247,27 +1272,69 @@ class UltraFastWeeklyRetrainer:
 
         self.feature_columns = feature_cols
 
-        return X, y_direction_encoded, y_return[valid_mask], direction_encoder, feature_cols
+        return X, y_direction_encoded, y_return, direction_encoder, feature_cols, dates
+
+    def _time_split_masks(self, dates, train_frac=0.60, cal_frac=0.80, purge_gap=5):
+        """Date-based split masks: train / calibration / test.
+
+        Rows are assigned by trading date so a calendar day never appears in
+        two splits. The last `purge_gap` trading days before each boundary
+        are dropped entirely: their 5-day forward labels are computed from
+        prices inside the next split.
+
+        Pass train_frac == cal_frac for a 2-way split (empty calibration).
+        """
+        date_vals = dates.values
+        unique_dates = np.sort(pd.unique(date_vals))
+        n = len(unique_dates)
+        train_end = int(train_frac * n)
+        cal_end = int(cal_frac * n)
+
+        train_dates = unique_dates[:max(train_end - purge_gap, 0)]
+        cal_dates = unique_dates[train_end:max(cal_end - purge_gap, train_end)]
+        test_dates = unique_dates[cal_end:]
+
+        train_mask = np.isin(date_vals, train_dates)
+        cal_mask = np.isin(date_vals, cal_dates)
+        test_mask = np.isin(date_vals, test_dates)
+        return train_mask, cal_mask, test_mask
 
     # ================================================================
     # CLASSIFICATION MODELS (ENSEMBLE)
     # ================================================================
 
-    def train_classification_models(self, X, y, feature_cols):
+    def train_classification_models(self, X, y, feature_cols, dates, y_return):
         """Train ensemble of classification models with calibration"""
         print("[TRAIN] Training classification models (ensemble)...")
 
-        # 3-way split: train (60%) / calibration (20%) / test (20%)
-        train_end = int(0.60 * len(X))
-        cal_end = int(0.80 * len(X))
-        X_train = X.iloc[:train_end]
-        X_cal = X.iloc[train_end:cal_end]
-        X_test = X.iloc[cal_end:]
-        y_train = y[:train_end]
-        y_cal = y[train_end:cal_end]
-        y_test = y[cal_end:]
+        # Date-based 3-way split: train (60%) / calibration (20%) / test (20%)
+        # with a 5-day purge gap so forward labels never cross a boundary
+        train_mask, cal_mask, test_mask = self._time_split_masks(dates)
+
+        # Label dead-zone: near-zero 5-day moves are noise, not signal. Drop
+        # them from train/cal only — production scores every stock, so the
+        # test set stays unfiltered to keep metrics honest.
+        dead_zone = np.abs(y_return.values) < LABEL_DEAD_ZONE_PCT
+        n_dz_dropped = int((dead_zone & (train_mask | cal_mask)).sum())
+        train_mask = train_mask & ~dead_zone
+        cal_mask = cal_mask & ~dead_zone
+
+        X_train, X_cal, X_test = X[train_mask], X[cal_mask], X[test_mask]
+        y_train, y_cal, y_test = y[train_mask], y[cal_mask], y[test_mask]
+        test_dead_zone = dead_zone[test_mask]
+
+        date_vals = dates.values.astype('datetime64[D]')
+        split_date_ranges = {
+            'train': (str(date_vals[train_mask].min()), str(date_vals[train_mask].max())),
+            'calibration': (str(date_vals[cal_mask].min()), str(date_vals[cal_mask].max())),
+            'test': (str(date_vals[test_mask].min()), str(date_vals[test_mask].max())),
+        }
 
         print(f"  Split: Train={len(X_train):,}, Calibration={len(X_cal):,}, Test={len(X_test):,}")
+        for split_name, (d0, d1) in split_date_ranges.items():
+            print(f"    {split_name}: {d0} .. {d1}")
+        print(f"  Dead-zone filter (|5d return| < {LABEL_DEAD_ZONE_PCT}%): "
+              f"dropped {n_dz_dropped:,} train/cal samples")
 
         # Feature scaling
         scaler = StandardScaler()
@@ -1297,18 +1364,59 @@ class UltraFastWeeklyRetrainer:
             'Logistic Regression': LogisticRegression(
                 class_weight='balanced', C=0.1,
                 solver='liblinear', max_iter=2000, random_state=42
+            ),
+            'Hist Gradient Boosting': HistGradientBoostingClassifier(
+                max_iter=500, learning_rate=0.1, max_leaf_nodes=31,
+                l2_regularization=1.0, min_samples_leaf=20,
+                early_stopping=True, validation_fraction=0.1,
+                random_state=42
             )
         }
 
-        # Time-weighted sample weights (recent data more relevant)
+        # Sample weights: class balance * time recency (rows are date-sorted,
+        # so positional time weights track trading dates). The dead-zone
+        # filter shifts class balance, which the balanced weights absorb.
+        class_weights = compute_sample_weight('balanced', y_train)
         n_train = len(y_train)
         time_positions = np.arange(n_train) / n_train
         decay_rate = 1.2
         time_weights = np.exp(decay_rate * (time_positions - 1))
-        time_weights = time_weights / time_weights.mean()
+        sample_weights = class_weights * time_weights
+        sample_weights = sample_weights / sample_weights.mean()
 
         print(f"  Time-weighted training: oldest={time_weights[0]:.3f}, "
               f"newest={time_weights[-1]:.3f}, ratio={time_weights[-1]/time_weights[0]:.1f}x")
+
+        # Optional hyperparameter tuning for HistGradientBoosting using purged
+        # time-series CV. Disable with ENABLE_HYPERPARAM_TUNING=false if the
+        # weekly retrain runs close to its 60-minute timeout.
+        self.hgb_best_params = None
+        if os.getenv('ENABLE_HYPERPARAM_TUNING', 'true').lower() == 'true':
+            print("  Tuning Hist Gradient Boosting (RandomizedSearchCV, purged CV)...", flush=True)
+            try:
+                from sklearn.model_selection import RandomizedSearchCV
+                param_distributions = {
+                    'learning_rate': [0.03, 0.05, 0.1, 0.15],
+                    'max_leaf_nodes': [15, 31, 63],
+                    'l2_regularization': [0.0, 0.1, 1.0, 10.0],
+                    'min_samples_leaf': [10, 20, 50],
+                }
+                search = RandomizedSearchCV(
+                    models['Hist Gradient Boosting'],
+                    param_distributions,
+                    n_iter=15,
+                    cv=PurgedTimeSeriesSplit(n_splits=3, purge_gap=5),
+                    scoring='f1_weighted',
+                    n_jobs=1,  # n_jobs=-1 can deadlock on Windows; HGB threads internally
+                    random_state=42,
+                )
+                search.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+                models['Hist Gradient Boosting'] = search.best_estimator_
+                self.hgb_best_params = search.best_params_
+                print(f"    Best params: {search.best_params_} "
+                      f"(CV F1={search.best_score_:.3f})")
+            except Exception as e:
+                print(f"    [WARN] Tuning failed, using default params: {e}")
 
         # Train and evaluate each model
         model_results = {}
@@ -1319,9 +1427,9 @@ class UltraFastWeeklyRetrainer:
             print(f"  Training {model_name}...", flush=True)
 
             try:
-                # Train with time-weighted sample weights
+                # Train with class-balanced, time-weighted sample weights
                 try:
-                    model.fit(X_train_scaled, y_train, sample_weight=time_weights)
+                    model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
                 except TypeError:
                     model.fit(X_train_scaled, y_train)
 
@@ -1334,8 +1442,16 @@ class UltraFastWeeklyRetrainer:
                 recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
                 f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
 
+                # Accuracy on test rows with meaningful moves (outside the
+                # dead-zone) — closer to what an acted-on signal experiences
+                ex_dz = ~test_dead_zone
+                accuracy_ex_dz = (
+                    accuracy_score(y_test[ex_dz], y_pred[ex_dz]) if ex_dz.sum() > 0 else 0.0
+                )
+
                 model_results[model_name] = {
                     'accuracy': accuracy,
+                    'accuracy_ex_dead_zone': accuracy_ex_dz,
                     'precision': precision,
                     'recall': recall,
                     'f1_score': f1,
@@ -1344,7 +1460,7 @@ class UltraFastWeeklyRetrainer:
                 }
                 trained_models[model_name] = model
 
-                print(f"    Acc={accuracy:.3f}, F1={f1:.3f}")
+                print(f"    Acc={accuracy:.3f} (ex-dead-zone={accuracy_ex_dz:.3f}), F1={f1:.3f}")
 
             except Exception as e:
                 print(f"    [ERROR] {model_name}: {e}")
@@ -1361,14 +1477,22 @@ class UltraFastWeeklyRetrainer:
                 voting='soft',
                 n_jobs=1  # n_jobs=-1 can deadlock on Windows
             )
-            ensemble.fit(X_train_scaled, y_train)
+            try:
+                ensemble.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+            except TypeError:
+                ensemble.fit(X_train_scaled, y_train)
 
             y_pred_ensemble = ensemble.predict(X_test_scaled)
             ensemble_accuracy = accuracy_score(y_test, y_pred_ensemble)
             ensemble_f1 = f1_score(y_test, y_pred_ensemble, average='weighted', zero_division=0)
+            ex_dz = ~test_dead_zone
+            ensemble_acc_ex_dz = (
+                accuracy_score(y_test[ex_dz], y_pred_ensemble[ex_dz]) if ex_dz.sum() > 0 else 0.0
+            )
 
             model_results['Ensemble'] = {
                 'accuracy': ensemble_accuracy,
+                'accuracy_ex_dead_zone': ensemble_acc_ex_dz,
                 'f1_score': ensemble_f1,
                 'cv_mean': 0, 'cv_std': 0,
             }
@@ -1386,16 +1510,18 @@ class UltraFastWeeklyRetrainer:
               f"(F1={model_results[best_model_name]['f1_score']:.3f}, "
               f"Acc={model_results[best_model_name]['accuracy']:.1%})")
 
-        # Calibrate probabilities on calibration set using isotonic regression
-        # (Replaces CalibratedClassifierCV(cv='prefit') removed in sklearn 1.6+)
-        print("[CALIBRATE] Calibrating model probabilities on held-out calibration set...")
+        # Calibrate probabilities on calibration set using Platt scaling.
+        # Isotonic regression is NOT used: it produced inversely-calibrated
+        # sell probabilities (Sell@70% conf = 43% acc vs Sell@50-54% = 53-57%);
+        # a sigmoid is monotonic and robust on a 20% calibration set.
+        print("[CALIBRATE] Calibrating model probabilities (Platt scaling) on held-out calibration set...")
         try:
             raw_probs_cal = best_model.predict_proba(X_cal_scaled)[:, 1]
-            iso_reg = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip')
-            iso_reg.fit(raw_probs_cal, y_cal)
-            calibrated_model = IsotonicCalibratedClassifier(
+            platt = LogisticRegression(solver='lbfgs', max_iter=1000)
+            platt.fit(SigmoidCalibratedClassifier.log_odds(raw_probs_cal), y_cal)
+            calibrated_model = SigmoidCalibratedClassifier(
                 base_model=best_model,
-                calibrator=iso_reg,
+                calibrator=platt,
                 classes=best_model.classes_
             )
 
@@ -1414,6 +1540,19 @@ class UltraFastWeeklyRetrainer:
                 low_acc = accuracy_score(y_test[~high_mask], cal_preds[~high_mask]) if (~high_mask).sum() > 0 else 0
                 print(f"  High-confidence (>=65%) accuracy: {high_acc:.3f} ({high_mask.sum()} samples)")
                 print(f"  Low-confidence (<65%) accuracy:   {low_acc:.3f} ({(~high_mask).sum()} samples)")
+                if high_acc <= low_acc:
+                    print("  [WARN] High confidence NOT more accurate — review calibration")
+
+            # Sell-side validation: accuracy must rise with sell confidence.
+            # 'Down' encodes to class 0, so sell probability = proba[:, 0].
+            sell_probs = cal_probs[:, 0]
+            sell_true = (y_test == 0)
+            for lo, hi in [(0.50, 0.55), (0.55, 0.60), (0.60, 0.70), (0.70, 1.01)]:
+                band_mask = (sell_probs >= lo) & (sell_probs < hi)
+                if band_mask.sum() > 10:
+                    band_acc = (sell_true[band_mask] & (cal_preds[band_mask] == 0)).sum() / band_mask.sum()
+                    print(f"  Sell accuracy @ {lo:.0%}-{min(hi, 1.0):.0%} confidence: "
+                          f"{band_acc:.3f} ({band_mask.sum()} samples)")
 
             best_model = calibrated_model
             print("[CALIBRATE] Probability calibration applied successfully")
@@ -1433,21 +1572,28 @@ class UltraFastWeeklyRetrainer:
             'y_train': y_train,
             'y_cal': y_cal,
             'y_test': y_test,
+            'split_date_ranges': split_date_ranges,
+            'dead_zone_pct': LABEL_DEAD_ZONE_PCT,
+            'dead_zone_dropped': n_dz_dropped,
         }
 
     # ================================================================
     # REGRESSION MODELS (5-day return magnitude)
     # ================================================================
 
-    def train_regression_models(self, X, y_return, feature_cols):
+    def train_regression_models(self, X, y_return, feature_cols, dates):
         """Train regression models for 5-day price change prediction"""
         print("[TRAIN] Training regression models (5-day return magnitude)...")
 
-        split_idx = int(0.8 * len(X))
-        X_train = X.iloc[:split_idx]
-        X_test = X.iloc[split_idx:]
-        y_train = y_return.iloc[:split_idx]
-        y_test = y_return.iloc[split_idx:]
+        # Date-based 80/20 split with purge gap (train_frac == cal_frac
+        # yields an empty calibration slice — a plain 2-way split)
+        train_mask, _, test_mask = self._time_split_masks(
+            dates, train_frac=0.80, cal_frac=0.80
+        )
+        X_train = X[train_mask]
+        X_test = X[test_mask]
+        y_train = y_return[train_mask]
+        y_test = y_return[test_mask]
 
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
@@ -1593,12 +1739,29 @@ class UltraFastWeeklyRetrainer:
             json.dump(self.feature_columns, f, indent=2)
         print(f"  [OK] Selected features ({len(self.feature_columns)}) -> {features_path}")
 
+        # Git commit hash for model provenance (best effort)
+        git_commit = None
+        try:
+            import subprocess
+            git_commit = subprocess.run(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                capture_output=True, text=True, timeout=10
+            ).stdout.strip() or None
+        except Exception:
+            pass
+
         # Save training metadata
         metadata = {
             'training_timestamp': self.timestamp,
+            'git_commit': git_commit,
             'feature_columns': self.feature_columns,
             'days_back': self.days_back,
             'target': '5-day price direction (Up/Down)',
+            'calibration_method': 'sigmoid (Platt scaling)',
+            'label_dead_zone_pct': clf_results.get('dead_zone_pct'),
+            'dead_zone_samples_dropped': clf_results.get('dead_zone_dropped'),
+            'split_date_ranges': clf_results.get('split_date_ranges'),
+            'hgb_tuned_params': getattr(self, 'hgb_best_params', None),
             'best_clf_model': clf_results['best_model_name'],
             'best_reg_model': reg_results['best_model_name'],
             'direction_classes': list(direction_encoder.classes_),
@@ -1647,14 +1810,14 @@ class UltraFastWeeklyRetrainer:
             # Step 4: Engineer features (VECTORIZED)
             df_features = self.engineer_features_vectorized(df)
 
-            # Step 5: Prepare ML dataset + feature selection
-            X, y_dir, y_return, direction_encoder, feature_cols = self.prepare_ml_dataset(df_features)
+            # Step 5: Prepare ML dataset + feature selection (train-slice only)
+            X, y_dir, y_return, direction_encoder, feature_cols, dates = self.prepare_ml_dataset(df_features)
 
-            # Step 6: Train classification ensemble
-            clf_results = self.train_classification_models(X, y_dir, feature_cols)
+            # Step 6: Train classification ensemble (date-based split)
+            clf_results = self.train_classification_models(X, y_dir, feature_cols, dates, y_return)
 
-            # Step 7: Train regression models
-            reg_results = self.train_regression_models(X, y_return, feature_cols)
+            # Step 7: Train regression models (date-based split)
+            reg_results = self.train_regression_models(X, y_return, feature_cols, dates)
 
             # Step 8: Save all artifacts
             self.save_model_artifacts(clf_results, reg_results, direction_encoder)

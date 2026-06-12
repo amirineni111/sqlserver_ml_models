@@ -132,28 +132,61 @@ def check_data_status():
         logging.error(f"❌ Error checking data status: {str(e)}")
         return False, None, None, None
 
+def days_since_last_retrain():
+    """Days since the current model artifacts were trained, or None."""
+    try:
+        import pickle
+        with open(os.path.join('data', 'training_metadata.pkl'), 'rb') as f:
+            meta = pickle.load(f)
+        trained_at = datetime.strptime(meta['training_timestamp'], '%Y%m%d_%H%M%S')
+        return (datetime.now() - trained_at).days
+    except Exception:
+        return None
+
 def should_retrain(data_age_days, force_retrain=False):
     """
-    Determine if model should be retrained based on data age.
-    
-    Daily automation should NOT retrain — the weekly retrain schedule
-    (run_weekly_retrain_optimized.bat) handles that. Daily runs only
-    need sentiment collection + export, which takes ~5 minutes.
-    
-    Use --force-retrain to override when needed.
-    
+    Determine if model should be retrained.
+
+    Daily automation normally does NOT retrain — the weekly retrain schedule
+    (run_weekly_retrain_optimized.bat) handles that. Two exceptions:
+    - --force-retrain
+    - Performance trigger: trailing 20-trading-day live accuracy (from
+      ml_prediction_outcomes) below MIN_LIVE_ACCURACY, outside the retrain
+      cooldown window.
+
     Args:
         data_age_days: Age of latest data in days
         force_retrain: Force retraining regardless of age
-        
+
     Returns: (should_retrain, reason)
     """
     if force_retrain:
         return True, "Force retrain requested by user"
-    
+
     if data_age_days is None:
         return False, "Unable to determine data age"
-    
+
+    # Performance trigger: live accuracy degradation
+    try:
+        from nasdaq_config import MIN_LIVE_ACCURACY, RETRAIN_COOLDOWN_DAYS
+        from evaluate_predictions import get_rolling_accuracy
+        stats = get_rolling_accuracy(n_days=20)
+        if stats and stats['n_predictions'] >= 100 and stats['accuracy'] < MIN_LIVE_ACCURACY:
+            since_retrain = days_since_last_retrain()
+            if since_retrain is not None and since_retrain < RETRAIN_COOLDOWN_DAYS:
+                return False, (
+                    f"Live 20-day accuracy {stats['accuracy']:.1%} is below "
+                    f"{MIN_LIVE_ACCURACY:.0%} but model retrained {since_retrain}d ago "
+                    f"(cooldown {RETRAIN_COOLDOWN_DAYS}d)"
+                )
+            return True, (
+                f"Live 20-day accuracy {stats['accuracy']:.1%} "
+                f"({stats['n_predictions']} predictions) below "
+                f"{MIN_LIVE_ACCURACY:.0%} threshold"
+            )
+    except Exception as e:
+        logging.warning(f"⚠️ Live-accuracy retrain check unavailable: {e}")
+
     # Daily automation skips retraining — weekly schedule handles it
     return False, f"Skipping retrain (data age: {data_age_days} days). Use --force-retrain or weekly schedule."
 
@@ -286,13 +319,52 @@ def run_sentiment_collection():
         logging.error(f"❌ Error during sentiment collection: {str(e)}")
         return False, 0
 
+def run_prediction_evaluation():
+    """
+    Score past predictions against realized 5-day returns (feedback loop).
+    Runs as a subprocess so a failure here never blocks the daily export.
+    Returns: success
+    """
+    try:
+        logging.info("📊 Evaluating past predictions vs realized 5-day returns...")
+        result = subprocess.run([
+            sys.executable, "evaluate_predictions.py"
+        ], capture_output=True, text=True, timeout=600)
+
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.startswith('[EVAL]') or line.startswith(('Overall', 'Buy:', 'Sell:', 'Confidence')):
+                    logging.info(line)
+            return True
+
+        logging.warning(f"⚠️ Prediction evaluation failed: {result.stderr or result.stdout}")
+        return False
+    except Exception as e:
+        logging.warning(f"⚠️ Prediction evaluation error: {str(e)}")
+        return False
+
+def get_live_accuracy_summary():
+    """Rolling live-accuracy stats for the daily summary report (or None)."""
+    try:
+        from evaluate_predictions import get_rolling_accuracy
+        result = {}
+        for window in (20, 60):
+            stats = get_rolling_accuracy(n_days=window)
+            if stats:
+                result[f"rolling_{window}d"] = stats
+        return result or None
+    except Exception as e:
+        logging.warning(f"⚠️ Could not compute live accuracy summary: {e}")
+        return None
+
 def create_daily_summary(log_filename, data_status, retrain_info, db_info):
     """Create a daily summary report."""
     summary_dir = Path("daily_reports")
     summary_dir.mkdir(exist_ok=True)
-    
+
     summary_file = summary_dir / f"daily_summary_{datetime.now().strftime('%Y%m%d')}.json"
-    
+
     summary = {
         "date": datetime.now().isoformat(),
         "log_file": str(log_filename),
@@ -311,9 +383,10 @@ def create_daily_summary(log_filename, data_status, retrain_info, db_info):
         "database_export": {
             "success": db_info[0] if db_info else False,
             "records_inserted": db_info[1] if db_info and len(db_info) > 1 else 0
-        }
+        },
+        "live_accuracy": get_live_accuracy_summary()
     }
-    
+
     with open(summary_file, 'w') as f:
         json.dump(summary, f, indent=2)
     
@@ -418,7 +491,13 @@ def main():
         
         db_success, record_count = export_to_database()
         db_info = (db_success, record_count)
-        
+
+        # Step 5: Score past predictions vs realized returns (never blocking)
+        logging.info("=" * 60)
+        logging.info("STEP 5: PREDICTION OUTCOME EVALUATION")
+        logging.info("=" * 60)
+        run_prediction_evaluation()
+
         if not db_success:
             logging.error("❌ Database export failed")
             send_failure_alert(

@@ -1250,8 +1250,23 @@ def main():
     parser.add_argument('--quick', action='store_true', help='Quick retrain (skip detailed EDA)')
     parser.add_argument('--backup-old', action='store_true', help='Backup existing model files')
     parser.add_argument('--compare-models', action='store_true', help='Compare new vs old model performance')
-    
+    parser.add_argument('--i-know-this-is-deprecated', action='store_true',
+                        help='Required: acknowledge this is NOT the production trainer')
+
     args = parser.parse_args()
+
+    # DEPRECATED: production retraining is weekly_retrain_ultra_fast.py (run by
+    # daily_automation.py / the weekly schedule). This script trains with labels
+    # ('Oversold (Buy)'/'Overbought (Sell)') that do NOT match the 'Up'/'Down'
+    # classes predict_trading_signals.py expects — retraining with it would
+    # silently break production predictions.
+    if not args.i_know_this_is_deprecated:
+        print("[DEPRECATED] retrain_model.py is no longer the production trainer.")
+        print("  Use: python weekly_retrain_ultra_fast.py")
+        print("  Its labels ('Oversold (Buy)'/'Overbought (Sell)') do not match the")
+        print("  'Up'/'Down' classes predict_trading_signals.py expects.")
+        print("  Pass --i-know-this-is-deprecated to run anyway.")
+        sys.exit(1)
     
     # Initialize retrainer
     retrainer = ModelRetrainer(backup_old=args.backup_old, quick_mode=args.quick)

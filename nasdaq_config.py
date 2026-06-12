@@ -83,6 +83,17 @@ MIN_MODEL_ACCURACY = float(os.getenv('MIN_MODEL_ACCURACY', '0.52'))
 # Live prediction accuracy threshold for retraining (default: 50%)
 MIN_LIVE_ACCURACY = float(os.getenv('MIN_LIVE_ACCURACY', '0.50'))
 
+# Label dead-zone (percent): training samples whose 5-day forward return is
+# smaller than this in absolute value are excluded from train/calibration sets.
+# A stock that moves +0.05% in 5 days is noise, not an "Up" — these near-zero
+# labels blur the decision boundary. Test set is never filtered (production
+# scores every stock). Set to 0 to disable.
+LABEL_DEAD_ZONE_PCT = float(os.getenv('LABEL_DEAD_ZONE_PCT', '1.0'))
+
+# Cooldown (days) between performance-triggered retrains, to prevent retrain
+# churn when live accuracy oscillates around the threshold.
+RETRAIN_COOLDOWN_DAYS = int(os.getenv('RETRAIN_COOLDOWN_DAYS', '5'))
+
 
 # ============================================================================
 # HISTORICAL DATA PARAMETERS
@@ -118,6 +129,12 @@ if not (0.0 <= SELL_MAX_CONFIDENCE <= 1.0):
 if MIN_STOCK_PRICE < 0:
     raise ValueError(f"MIN_STOCK_PRICE must be >= 0, got {MIN_STOCK_PRICE}")
 
+if LABEL_DEAD_ZONE_PCT < 0:
+    raise ValueError(f"LABEL_DEAD_ZONE_PCT must be >= 0, got {LABEL_DEAD_ZONE_PCT}")
+
+if RETRAIN_COOLDOWN_DAYS < 0:
+    raise ValueError(f"RETRAIN_COOLDOWN_DAYS must be >= 0, got {RETRAIN_COOLDOWN_DAYS}")
+
 for _sector, _thresh in SECTOR_CONFIDENCE_OVERRIDES.items():
     if not (0.0 <= _thresh <= 1.0):
         raise ValueError(f"SECTOR_CONFIDENCE_OVERRIDES['{_sector}'] must be 0-1, got {_thresh}")
@@ -138,6 +155,8 @@ def print_config():
     print(f"Minimum Prediction Confidence: {MIN_PREDICTION_CONFIDENCE:.0%}")
     print(f"Model Accuracy Threshold:     {MIN_MODEL_ACCURACY:.0%}")
     print(f"Live Accuracy Threshold:      {MIN_LIVE_ACCURACY:.0%}")
+    print(f"Label Dead-Zone:              |5d return| < {LABEL_DEAD_ZONE_PCT}% excluded from training")
+    print(f"Retrain Cooldown:             {RETRAIN_COOLDOWN_DAYS} days")
     print(f"Historical Days:              {HISTORICAL_DAYS}")
     print(f"--- Reliability Filters ---")
     print(f"Buy Min Confidence:           {BUY_MIN_CONFIDENCE:.0%} (dead-zone suppression)")
