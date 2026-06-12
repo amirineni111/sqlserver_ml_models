@@ -96,13 +96,17 @@ Merged from shared `market_context_daily` table on `trading_date` via `_merge_ma
 | trading_date | DATE | Prediction date |
 | predicted_signal | VARCHAR | 'Buy' or 'Sell' |
 | confidence_percentage | FLOAT | Model confidence (0-100) |
-| signal_strength | VARCHAR | 'Strong'/'Moderate'/'Weak' based on confidence |
+| signal_strength | VARCHAR | 'Strong'/'Moderate'/'Weak' based on confidence; 'Suppressed' for non-actionable rows |
 | RSI | FLOAT | Current RSI value |
 | buy_probability | FLOAT | P(Buy) from model |
 | sell_probability | FLOAT | P(Sell) from model |
-| high_confidence | BIT | Flag for confidence ≥ 60% (lowered from 70% Apr 2026) |
+| high_confidence | BIT | Flag for confidence ≥ 60% (lowered from 70% Apr 2026); always 0 for suppressed rows |
+| is_actionable | BIT | 1 = passed reliability filters (tradeable); 0 = suppressed (June 2026) |
+| suppression_reason | VARCHAR | Why a row was suppressed: penny_stock / buy_dead_zone / sell_high_conf / rsi_overbought_buy / energy_sector / sector_override; NULL if actionable |
 
 **Note on Confidence Threshold**: High-confidence threshold was lowered from 70% to 60% in April 2026 after analysis showed that calibrated models naturally output conservative probabilities. The previous 70% threshold resulted in only 50% prediction accuracy (no better than random). The 60% threshold aligns with the model's calibration and unlocks actionable signals while maintaining quality.
+
+**Note on Suppression Flags (June 2026)**: Previously, signals failing the reliability filters in `nasdaq_config.py` were dropped before export, so `ml_trading_predictions` only contained the few survivors (~tens/day out of ~2,300 tickers). Now every ticker's prediction is written daily; suppressed rows carry `is_actionable=0` + `suppression_reason`. Consumers wanting only tradeable signals must filter `WHERE is_actionable = 1` (or `high_confidence = 1`, which is forced to 0 on suppressed rows). `ml_prediction_outcomes` likewise scores all rows but the rolling-accuracy retrain gate counts actionable rows only.
 
 ### Also Writes
 - `ml_prediction_summary` — Daily aggregate stats (buy/sell counts, avg confidence, trend counts)

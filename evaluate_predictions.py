@@ -52,11 +52,27 @@ BEGIN
         realized_date DATE,
         correct BIT,
         model_version VARCHAR(50),
+        is_actionable BIT,
+        suppression_reason VARCHAR(100),
         evaluated_at DATETIME DEFAULT GETDATE(),
         INDEX IDX_outcome_pred (prediction_id),
         INDEX IDX_outcome_ticker_date (ticker, trading_date)
     )
 END
+"""
+
+# Suppressed signals are now stored (is_actionable=0) instead of dropped, so
+# outcomes cover the full ticker universe — needed to re-derive the reliability
+# thresholds. Headline accuracy stays actionable-only (see get_rolling_accuracy).
+MIGRATE_COLUMNS_SQL = f"""
+IF COL_LENGTH('{OUTCOMES_TABLE}', 'is_actionable') IS NULL
+    ALTER TABLE {OUTCOMES_TABLE} ADD is_actionable BIT;
+IF COL_LENGTH('{OUTCOMES_TABLE}', 'suppression_reason') IS NULL
+    ALTER TABLE {OUTCOMES_TABLE} ADD suppression_reason VARCHAR(100);
+IF COL_LENGTH('ml_trading_predictions', 'is_actionable') IS NULL
+    ALTER TABLE ml_trading_predictions ADD is_actionable BIT;
+IF COL_LENGTH('ml_trading_predictions', 'suppression_reason') IS NULL
+    ALTER TABLE ml_trading_predictions ADD suppression_reason VARCHAR(100);
 """
 
 # LEAD(close, 5) over actual history rows gives the close exactly 5 TRADING
@@ -75,6 +91,7 @@ WITH px AS (
 )
 SELECT p.prediction_id, p.run_timestamp, p.ticker, p.trading_date,
        p.predicted_signal, p.confidence,
+       p.is_actionable, p.suppression_reason,
        px.entry_close, px.realized_close_5d, px.realized_date
 FROM dbo.ml_trading_predictions p
 INNER JOIN px
@@ -113,6 +130,7 @@ def ensure_outcomes_table(db):
     engine = db.get_sqlalchemy_engine()
     with engine.begin() as conn:
         conn.execute(text(CREATE_TABLE_SQL))
+        conn.execute(text(MIGRATE_COLUMNS_SQL))
 
 
 def evaluate_new_predictions(db=None, days_back=120):
@@ -152,18 +170,25 @@ def evaluate_new_predictions(db=None, days_back=120):
         except Exception:
             pass
 
+    # Rows written before the suppression flag existed had survived the old
+    # drop-style filters, so NULL means actionable.
+    df['is_actionable'] = df['is_actionable'].fillna(True).astype(bool)
+
     out_cols = ['prediction_id', 'ticker', 'trading_date', 'predicted_signal',
                 'confidence', 'entry_close', 'realized_close_5d',
-                'realized_return_5d', 'realized_date', 'correct', 'model_version']
+                'realized_return_5d', 'realized_date', 'correct', 'model_version',
+                'is_actionable', 'suppression_reason']
     out = df[out_cols]
 
     engine = db.get_sqlalchemy_engine()
     out.to_sql(OUTCOMES_TABLE, engine, if_exists='append', index=False)
 
-    acc = out['correct'].mean()
+    actionable = out[out['is_actionable']]
+    acc = actionable['correct'].mean() if len(actionable) else float('nan')
     print(f"[EVAL] Scored {len(out):,} predictions "
           f"({out['trading_date'].min()} .. {out['trading_date'].max()}), "
-          f"accuracy={acc:.1%}")
+          f"actionable accuracy={acc:.1%} ({len(actionable):,} actionable, "
+          f"{len(out) - len(actionable):,} suppressed)")
     return len(out)
 
 
@@ -173,7 +198,8 @@ WITH recent AS (
     FROM dbo.ml_prediction_outcomes
     ORDER BY trading_date DESC
 )
-SELECT o.predicted_signal, o.confidence, o.correct, o.trading_date, t.sector
+SELECT o.predicted_signal, o.confidence, o.correct, o.trading_date,
+       o.is_actionable, t.sector
 FROM dbo.ml_prediction_outcomes o
 INNER JOIN recent r ON o.trading_date = r.trading_date
 LEFT JOIN dbo.nasdaq_top100 t ON t.ticker = o.ticker
@@ -183,14 +209,25 @@ LEFT JOIN dbo.nasdaq_top100 t ON t.ticker = o.ticker
 def get_rolling_accuracy(db=None, n_days=20):
     """Accuracy over the last n_days *trading* days of evaluated outcomes.
 
+    All stats are computed on actionable outcomes only (NULL = pre-flag rows,
+    which were all actionable), so the MIN_LIVE_ACCURACY retrain gate keeps
+    measuring tradeable signals. Full-universe counts are reported separately.
+
     Returns a dict (json-serializable) or None when no outcomes exist yet.
     """
     db = db or SQLServerConnection()
     try:
+        ensure_outcomes_table(db)
         df = db.execute_query(ROLLING_SQL, params={'n_days': n_days})
     except Exception as e:
         print(f"[EVAL] Rolling accuracy unavailable: {e}")
         return None
+    if df.empty:
+        return None
+
+    df['is_actionable'] = df['is_actionable'].fillna(True).astype(bool)
+    df_all = df
+    df = df[df['is_actionable']].copy()
     if df.empty:
         return None
 
@@ -213,9 +250,12 @@ def get_rolling_accuracy(db=None, n_days=20):
                 by_sector[sector] = {'n': int(len(grp)),
                                      'accuracy': round(float(grp['correct'].mean()), 4)}
 
+    suppressed = df_all[~df_all['is_actionable']]
     return {
         'window_trading_days': n_days,
         'n_predictions': int(len(df)),
+        'n_suppressed': int(len(suppressed)),
+        'suppressed_accuracy': round(float(suppressed['correct'].mean()), 4) if len(suppressed) else None,
         'accuracy': round(float(df['correct'].mean()), 4),
         'buy_accuracy': round(float(buys['correct'].mean()), 4) if len(buys) else None,
         'buy_n': int(len(buys)),

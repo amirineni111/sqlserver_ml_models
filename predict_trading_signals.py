@@ -980,9 +980,13 @@ class TradingSignalPredictor:
         return results
 
     def _apply_reliability_filters(self, results: pd.DataFrame) -> pd.DataFrame:
-        """Suppress signals identified as systematically unreliable.
+        """Flag signals identified as systematically unreliable.
 
-        Rules (applied in order, all based on May 2026 accuracy analysis):
+        Every prediction is kept (so all tickers get a direction); unreliable ones
+        are marked is_actionable=False with a suppression_reason. Downstream
+        consumers should filter on is_actionable=1 for tradeable signals.
+
+        Rules (all based on May 2026 accuracy analysis):
         0. Penny stock filter: close_price < MIN_STOCK_PRICE ($5). Defense-in-depth
            after SQL-layer filter. Buy acc below $5: 41.9-46.2% vs 48.8% above $10.
         1. Buy dead-zone: Buy @ 55-65% confidence has 34-48% accuracy — worse than random.
@@ -1000,74 +1004,75 @@ class TradingSignalPredictor:
         if results is None or results.empty:
             return results
 
-        initial_count = len(results)
-        suppressed = {}
+        rule_masks = {}
 
         # Rule 0: Penny stock price floor (defense-in-depth after SQL filter)
         if 'close_price' in results.columns:
-            penny_mask = results['close_price'] < MIN_STOCK_PRICE
-            suppressed['penny_stock'] = penny_mask.sum()
-            results = results[~penny_mask].copy()
+            rule_masks['penny_stock'] = results['close_price'] < MIN_STOCK_PRICE
         else:
-            suppressed['penny_stock'] = 0
+            rule_masks['penny_stock'] = pd.Series(False, index=results.index)
 
         # Rule 1: Buy dead-zone filter
-        buy_dead_zone_mask = (
+        rule_masks['buy_dead_zone'] = (
             (results['predicted_signal'] == 'Up') &
             (results['confidence'] < BUY_MIN_CONFIDENCE)
         )
-        suppressed['buy_dead_zone'] = buy_dead_zone_mask.sum()
-        results = results[~buy_dead_zone_mask].copy()
 
         # Rule 2: Sell inverted calibration filter
-        sell_high_conf_mask = (
+        rule_masks['sell_high_conf'] = (
             (results['predicted_signal'] == 'Down') &
             (results['confidence'] > SELL_MAX_CONFIDENCE)
         )
-        suppressed['sell_high_confidence'] = sell_high_conf_mask.sum()
-        results = results[~sell_high_conf_mask].copy()
 
         # Rule 3: RSI overbought Buy block
-        rsi_block_mask = (
+        rule_masks['rsi_overbought_buy'] = (
             (results['predicted_signal'] == 'Up') &
             (results['RSI'].notna()) &
             (results['RSI'] > RSI_OVERBOUGHT_BUY_BLOCK)
         )
-        suppressed['rsi_overbought_buy'] = rsi_block_mask.sum()
-        results = results[~rsi_block_mask].copy()
 
         # Rule 4: Energy sector exclusion
-        energy_suppressed = 0
         if ENERGY_SECTOR_EXCLUDED and 'sector' in results.columns:
-            energy_mask = results['sector'] == 'Energy'
-            energy_suppressed = energy_mask.sum()
-            results = results[~energy_mask].copy()
-        suppressed['energy_sector'] = energy_suppressed
+            rule_masks['energy_sector'] = results['sector'] == 'Energy'
+        else:
+            rule_masks['energy_sector'] = pd.Series(False, index=results.index)
 
         # Rule 5: Sector-specific confidence overrides for near-random sectors.
         # Tech (49.9% acc) and Healthcare (49.4% acc) require higher confidence threshold.
-        sector_override_suppressed = 0
+        sector_override_mask = pd.Series(False, index=results.index)
         if SECTOR_CONFIDENCE_OVERRIDES and 'sector' in results.columns:
             for sector_name, sector_threshold in SECTOR_CONFIDENCE_OVERRIDES.items():
-                sector_buy_mask = (
+                sector_override_mask |= (
                     (results['predicted_signal'] == 'Up') &
                     (results['sector'] == sector_name) &
                     (results['confidence'] < sector_threshold)
                 )
-                sector_override_suppressed += sector_buy_mask.sum()
-                results = results[~sector_buy_mask].copy()
-        suppressed['sector_override'] = sector_override_suppressed
+        rule_masks['sector_override'] = sector_override_mask
 
-        total_suppressed = initial_count - len(results)
+        # Annotate: first matching rule (in declaration order) wins as the reason
+        results = results.copy()
+        results['suppression_reason'] = None
+        for reason, mask in rule_masks.items():
+            unassigned = mask & results['suppression_reason'].isna()
+            results.loc[unassigned, 'suppression_reason'] = reason
+        results['is_actionable'] = results['suppression_reason'].isna()
+        # A suppressed signal is never high-confidence, regardless of its raw
+        # probability — keeps downstream high_confidence=1 filters tradeable
+        if 'high_confidence' in results.columns:
+            results['high_confidence'] = results['high_confidence'] & results['is_actionable']
+
+        total_suppressed = int((~results['is_actionable']).sum())
         if total_suppressed > 0:
+            counts = {reason: int(mask.sum()) for reason, mask in rule_masks.items()}
             safe_print(
-                f"[FILTER] Reliability filters suppressed {total_suppressed}/{initial_count} signals: "
-                f"penny_stock={suppressed['penny_stock']}, "
-                f"buy_dead_zone={suppressed['buy_dead_zone']}, "
-                f"sell_high_conf={suppressed['sell_high_confidence']}, "
-                f"rsi_overbought_buy={suppressed['rsi_overbought_buy']}, "
-                f"energy_sector={suppressed['energy_sector']}, "
-                f"sector_override={suppressed['sector_override']}"
+                f"[FILTER] Reliability filters suppressed {total_suppressed}/{len(results)} signals "
+                f"(kept in output, flagged is_actionable=0): "
+                f"penny_stock={counts['penny_stock']}, "
+                f"buy_dead_zone={counts['buy_dead_zone']}, "
+                f"sell_high_conf={counts['sell_high_conf']}, "
+                f"rsi_overbought_buy={counts['rsi_overbought_buy']}, "
+                f"energy_sector={counts['energy_sector']}, "
+                f"sector_override={counts['sector_override']}"
             )
 
         return results
@@ -1080,10 +1085,16 @@ class TradingSignalPredictor:
         output.append("=" * 80)
         output.append(f"[TARGET] TRADING SIGNAL PREDICTIONS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         output.append("=" * 80)
+        # Display only actionable signals (suppressed rows are kept in the data
+        # for the database/outcomes loop but are not tradeable)
+        if 'is_actionable' in results.columns:
+            actionable = results[results['is_actionable']]
+        else:
+            actionable = results
         # Filter high confidence predictions
-        high_conf = results[results['high_confidence']]
-        medium_conf = results[(results['confidence'] > MEDIUM_CONFIDENCE_THRESHOLD) & (results['confidence'] <= HIGH_CONFIDENCE_THRESHOLD)]
-        low_conf = results[results['confidence'] <= MEDIUM_CONFIDENCE_THRESHOLD]
+        high_conf = actionable[actionable['high_confidence']]
+        medium_conf = actionable[(actionable['confidence'] > MEDIUM_CONFIDENCE_THRESHOLD) & (actionable['confidence'] <= HIGH_CONFIDENCE_THRESHOLD)]
+        low_conf = actionable[actionable['confidence'] <= MEDIUM_CONFIDENCE_THRESHOLD]
         # High confidence predictions
         if not high_conf.empty:
             output.append(f"\n[UP] HIGH CONFIDENCE PREDICTIONS (>{HIGH_CONFIDENCE_THRESHOLD:.0%})")
@@ -1108,15 +1119,17 @@ class TradingSignalPredictor:
                 output.append(f"{signal_emoji} {row['ticker']}: {row['predicted_signal']} ({row['confidence']:.1%})")
         # Summary statistics
         total_predictions = len(results)
+        actionable_count = len(actionable)
         high_conf_count = len(high_conf)
-        up_signals = len(results[results['predicted_signal'] == 'Up'])
-        down_signals = len(results[results['predicted_signal'] == 'Down'])
+        up_signals = len(actionable[actionable['predicted_signal'] == 'Up'])
+        down_signals = len(actionable[actionable['predicted_signal'] == 'Down'])
         output.append("\n[DATA] PREDICTION SUMMARY")
         output.append("-" * 30)
         output.append(f"Total Predictions: {total_predictions}")
+        output.append(f"Actionable: {actionable_count} ({actionable_count/total_predictions:.1%}) | Suppressed: {total_predictions - actionable_count}")
         output.append(f"High Confidence: {high_conf_count} ({high_conf_count/total_predictions:.1%})")
-        output.append(f"Up Signals: {up_signals}")
-        output.append(f"Down Signals: {down_signals}")
+        output.append(f"Up Signals (actionable): {up_signals}")
+        output.append(f"Down Signals (actionable): {down_signals}")
         output.append(f"Average Confidence: {results['confidence'].mean():.1%}")
         return "\n".join(output)
 
@@ -1148,7 +1161,9 @@ def main():
         output = predictor.format_prediction_output(results, show_all=args.show_all)
         print(output)
         
-        # Return high confidence count for exit code
+        # Return high confidence count for exit code (actionable signals only)
+        if 'is_actionable' in results.columns:
+            results = results[results['is_actionable']]
         high_conf_count = len(results[results['high_confidence']])
         safe_print(f"\n✅ Analysis complete. Found {high_conf_count} high-confidence signals.")
         

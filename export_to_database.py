@@ -71,6 +71,8 @@ class DatabaseExporter:
                 high_confidence BIT,
                 sell_probability FLOAT,
                 buy_probability FLOAT,
+                is_actionable BIT,
+                suppression_reason VARCHAR(100),
                 created_at DATETIME DEFAULT GETDATE(),
                 INDEX IDX_ticker_date (ticker, trading_date),
                 INDEX IDX_run_timestamp (run_timestamp),
@@ -81,6 +83,7 @@ class DatabaseExporter:
         ELSE
             PRINT 'Table {self.predictions_table} already exists'
         """
+
         
         # Create technical indicators table
         technical_sql = f"""
@@ -170,12 +173,30 @@ class DatabaseExporter:
                 conn.execute(text(technical_sql))
                 conn.execute(text(summary_sql))
                 conn.commit()
+            self._ensure_predictions_schema()
             print("[SUCCESS] All tables created successfully!")
             return True
         except Exception as e:
             print(f"[ERROR] Failed to create tables: {e}")
             return False
-    
+
+    def _ensure_predictions_schema(self):
+        """Add suppression-flag columns to a pre-existing predictions table.
+
+        Suppressed signals are now written with is_actionable=0 instead of
+        being dropped before export. Idempotent; safe to run every export.
+        """
+        migration_sql = f"""
+        IF COL_LENGTH('{self.predictions_table}', 'is_actionable') IS NULL
+            ALTER TABLE {self.predictions_table} ADD is_actionable BIT;
+        IF COL_LENGTH('{self.predictions_table}', 'suppression_reason') IS NULL
+            ALTER TABLE {self.predictions_table} ADD suppression_reason VARCHAR(100);
+        """
+        with self.engine.connect() as conn:
+            conn.execute(text(migration_sql))
+            conn.commit()
+
+
     def export_predictions_to_db(self, ticker=None, confidence_threshold=0.5):
         """Export predictions to database"""
         print("[PROCESSING] Generating predictions for database export...")
@@ -204,7 +225,13 @@ class DatabaseExporter:
         
         # Export to database
         try:
-            print(f"[DATABASE] Inserting {len(predictions_df)} predictions...")
+            self._ensure_predictions_schema()
+            if 'is_actionable' in predictions_df.columns:
+                actionable_count = int(predictions_df['is_actionable'].astype(bool).sum())
+                print(f"[DATABASE] Inserting {len(predictions_df)} predictions "
+                      f"({actionable_count} actionable, {len(predictions_df) - actionable_count} suppressed)...")
+            else:
+                print(f"[DATABASE] Inserting {len(predictions_df)} predictions...")
             predictions_df.to_sql(
                 self.predictions_table,
                 self.engine,
@@ -260,6 +287,10 @@ class DatabaseExporter:
         df['signal_strength'] = df['confidence'].apply(
             lambda x: 'Strong' if x >= 0.67 else 'Moderate' if x >= 0.55 else 'Weak'
         )
+        # Suppressed rows are stored for the outcomes feedback loop but are not
+        # tradeable — label them so they can't be mistaken for strong signals
+        if 'is_actionable' in df.columns:
+            df.loc[~df['is_actionable'].astype(bool), 'signal_strength'] = 'Suppressed'
         df['rsi_category'] = df['RSI'].apply(
             lambda x: 'Oversold' if x < 30 else 'Overbought' if x > 70 else 'Neutral'
         )
@@ -277,11 +308,20 @@ class DatabaseExporter:
         if 'down_probability' in df.columns:
             df['sell_probability'] = df['down_probability']
         
+        # Normalize suppression flags (bool for BIT, None stays NULL).
+        # Suppressed rows must never read as high-confidence: downstream
+        # consumers (dashboard, agentic AI) filter on high_confidence=1 and
+        # don't know about is_actionable yet.
+        if 'is_actionable' in df.columns:
+            df['is_actionable'] = df['is_actionable'].astype(bool)
+            df['high_confidence'] = df['high_confidence'].astype(bool) & df['is_actionable']
+
         columns = [
             'run_timestamp', 'trading_date', 'ticker', 'company',
             'predicted_signal', 'confidence', 'confidence_percentage', 'signal_strength',
             'close_price', 'RSI', 'rsi_category', 'high_confidence',
-            'sell_probability', 'buy_probability'
+            'sell_probability', 'buy_probability',
+            'is_actionable', 'suppression_reason'
         ]
         
         return df[[col for col in columns if col in df.columns]]
@@ -345,17 +385,26 @@ class DatabaseExporter:
             return pd.DataFrame()
     
     def _generate_summary(self, predictions_df, technical_df, run_timestamp):
-        """Generate summary statistics"""
+        """Generate summary statistics
+
+        Signal counts use only actionable rows so the summary keeps its
+        pre-flag semantics (suppressed rows are stored but not tradeable).
+        """
+        if 'is_actionable' in predictions_df.columns:
+            actionable_df = predictions_df[predictions_df['is_actionable'].astype(bool)]
+        else:
+            actionable_df = predictions_df
+
         summary = {
             'run_timestamp': run_timestamp,
             'run_date': run_timestamp.date(),
             'total_predictions': len(predictions_df),
-            'high_confidence_count': len(predictions_df[predictions_df['confidence'] > 0.7]),
-            'medium_confidence_count': len(predictions_df[(predictions_df['confidence'] > 0.6) & (predictions_df['confidence'] <= 0.7)]),
-            'buy_signals': len(predictions_df[predictions_df['predicted_signal'].str.contains('Buy|Up', na=False)]),
-            'sell_signals': len(predictions_df[predictions_df['predicted_signal'].str.contains('Sell|Down', na=False)]),
-            'avg_confidence': predictions_df['confidence'].mean(),
-            'avg_rsi': predictions_df['RSI'].mean() if 'RSI' in predictions_df.columns else None
+            'high_confidence_count': len(actionable_df[actionable_df['confidence'] > 0.7]),
+            'medium_confidence_count': len(actionable_df[(actionable_df['confidence'] > 0.6) & (actionable_df['confidence'] <= 0.7)]),
+            'buy_signals': len(actionable_df[actionable_df['predicted_signal'].str.contains('Buy|Up', na=False)]),
+            'sell_signals': len(actionable_df[actionable_df['predicted_signal'].str.contains('Sell|Down', na=False)]),
+            'avg_confidence': actionable_df['confidence'].mean() if not actionable_df.empty else None,
+            'avg_rsi': actionable_df['RSI'].mean() if 'RSI' in actionable_df.columns and not actionable_df.empty else None
         }
         
         # Add technical summary if available
