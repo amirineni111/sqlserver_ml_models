@@ -297,6 +297,14 @@ def main():
     db = SQLServerConnection()
     if not args.summary_only:
         evaluate_new_predictions(db, days_back=args.days_back)
+        # Re-derive reliability thresholds from the freshly-scored outcomes so the gates
+        # track the current model's realized accuracy (Layer 2 feedback loop). Best-effort:
+        # imported lazily to avoid a circular import and never block evaluation.
+        try:
+            from derive_thresholds import derive_and_save
+            derive_and_save(db=db)
+        except Exception as e:  # noqa: BLE001
+            print(f"[EVAL] Threshold re-derivation skipped: {e}")
     print_summary(db)
 
 

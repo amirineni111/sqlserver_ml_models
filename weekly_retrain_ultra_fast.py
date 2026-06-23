@@ -1559,11 +1559,43 @@ class UltraFastWeeklyRetrainer:
         except Exception as e:
             print(f"  [WARN] Calibration skipped: {e}")
 
+        # Decision-threshold tuning on P(Up). Platt scaling on a low-edge model collapses
+        # calibrated probabilities toward the class base rate (~0.55 Up), so argmax@0.5
+        # labels ~94% of tickers 'Up' and confidence compresses into 0.50-0.60 (Jun 2026
+        # diagnosis, diagnose_model_bias.py). Pick the P(Up) cut that maximizes BALANCED
+        # accuracy on the held-out calibration split — restores a sane Buy/Sell mix and a
+        # meaningful operating point. Saved to data/decision_threshold.json and consumed by
+        # predict_trading_signals.py (defaults to 0.5 when absent).
+        decision_threshold_up = 0.5
+        try:
+            up_idx = list(best_model.classes_).index(1) if 1 in list(best_model.classes_) else 1
+            p_up_cal = best_model.predict_proba(X_cal_scaled)[:, up_idx]
+            y_up_cal = (y_cal == 1).astype(int)
+            best_bal, best_thr = -1.0, 0.5
+            for thr in np.round(np.arange(0.30, 0.71, 0.005), 4):
+                pred_up = (p_up_cal >= thr).astype(int)
+                tp = int(((pred_up == 1) & (y_up_cal == 1)).sum())
+                fn = int(((pred_up == 0) & (y_up_cal == 1)).sum())
+                tn = int(((pred_up == 0) & (y_up_cal == 0)).sum())
+                fp = int(((pred_up == 1) & (y_up_cal == 0)).sum())
+                tpr = tp / (tp + fn) if (tp + fn) else 0.0
+                tnr = tn / (tn + fp) if (tn + fp) else 0.0
+                bal = (tpr + tnr) / 2.0
+                if bal > best_bal:
+                    best_bal, best_thr = bal, float(thr)
+            decision_threshold_up = best_thr
+            up_share = float((p_up_cal >= best_thr).mean())
+            print(f"[THRESHOLD] Tuned P(Up) decision threshold = {best_thr:.3f} "
+                  f"(balanced acc={best_bal:.3f}, calls {up_share:.1%} Up on calibration split)")
+        except Exception as e:
+            print(f"  [WARN] Decision-threshold tuning skipped, using 0.5: {e}")
+
         return {
             'model_results': model_results,
             'trained_models': trained_models,
             'best_model_name': best_model_name,
             'best_model': best_model,
+            'decision_threshold_up': decision_threshold_up,
             'scaler': scaler,
             'feature_columns': feature_cols,
             'X_train': X_train,
@@ -1758,6 +1790,7 @@ class UltraFastWeeklyRetrainer:
             'days_back': self.days_back,
             'target': '5-day price direction (Up/Down)',
             'calibration_method': 'sigmoid (Platt scaling)',
+            'decision_threshold_up': clf_results.get('decision_threshold_up', 0.5),
             'label_dead_zone_pct': clf_results.get('dead_zone_pct'),
             'dead_zone_samples_dropped': clf_results.get('dead_zone_dropped'),
             'split_date_ranges': clf_results.get('split_date_ranges'),
@@ -1782,7 +1815,28 @@ class UltraFastWeeklyRetrainer:
         with open(self.data_dir / 'training_metadata.pkl', 'wb') as f:
             pickle.dump(metadata, f)
 
+        # Decision threshold for the predictor (P(Up) cut tuned on the calibration split).
+        import json as _json_dt
+        with open(self.data_dir / 'decision_threshold.json', 'w') as f:
+            _json_dt.dump({
+                'p_up_threshold': float(clf_results.get('decision_threshold_up', 0.5)),
+                'model_training_timestamp': self.timestamp,
+                'note': 'Tuned for balanced accuracy on the calibration split; see weekly_retrain_ultra_fast.py',
+            }, f, indent=2)
+
         print(f"[SAVE] All artifacts saved to {self.data_dir}/")
+
+        # Reset outcome-driven thresholds for the new model. The prior model's derived
+        # gates are stale (and may be out of the new calibration's confidence range — the
+        # bug that zeroed out buys in Jun 2026). With no current-model outcomes yet this
+        # regenerates derived_thresholds.json to the hardcoded fallback; the daily
+        # evaluation job re-derives real gates as outcomes accrue. Best-effort: never let
+        # this block a retrain.
+        try:
+            from derive_thresholds import derive_and_save
+            derive_and_save()
+        except Exception as e:  # noqa: BLE001
+            print(f"[SAVE] Threshold reset skipped: {e}")
 
     # ================================================================
     # MAIN PIPELINE

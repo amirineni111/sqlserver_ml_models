@@ -424,6 +424,15 @@ class DatabaseExporter:
             'avg_rsi': actionable_df['RSI'].mean() if 'RSI' in actionable_df.columns and not actionable_df.empty else None
         }
         
+        # Guardrail: a populated prediction set with ~0 actionable buys is the signature
+        # of the Jun 2026 bug (gates drifted out of the model's confidence range). Warn
+        # loudly so it can't silently persist for weeks again.
+        total = summary['total_predictions']
+        if total > 50 and summary['buy_signals'] == 0:
+            print(f"[GUARDRAIL][WARN] 0 actionable BUY signals out of {total} predictions. "
+                  f"Likely a confidence-threshold/calibration mismatch (see nasdaq_config.py / "
+                  f"derive_thresholds.py). avg_confidence={summary['avg_confidence']}.")
+
         # Add technical summary if available
         if not technical_df.empty:
             if 'macd_trend' in technical_df.columns:

@@ -1,6 +1,15 @@
 """
 Model Retraining Script
 
+!!! DEPRECATED / NOT THE LIVE TRAINER (quarantined Jun 2026) !!!
+The production weekly retrain is `weekly_retrain_ultra_fast.py` (invoked by
+run_weekly_retrain.bat). The deployed model artifacts in data/ were produced by it
+(Up/Down direction labels, sigmoid calibration). THIS script uses the obsolete
+'Oversold (Buy)'/'Overbought (Sell)' label scheme and a different feature set that no
+longer matches data/selected_features.json — running it would produce a model the
+prediction/export code cannot interpret (it expects 'Up'/'Down'). Kept only because docs
+still reference it; do NOT wire it into the scheduler. See [[nasdaq-accuracy-overhaul-june-2026]].
+
 This script automates the complete process of retraining the ML model with the latest data.
 It performs all the steps from data loading to model deployment.
 

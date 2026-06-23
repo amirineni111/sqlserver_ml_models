@@ -129,6 +129,22 @@ class TradingSignalPredictor:
             except FileNotFoundError:
                 self.sector_encoder = None
                 print("[INFO] No sector encoder found - sector features will default to 0")
+            # Decision threshold on P(Up), tuned per-model on the calibration split to undo
+            # the sigmoid-calibration base-rate collapse (Jun 2026 fix). Defaults to 0.5
+            # (== argmax) when the artifact is absent, so behavior is unchanged for models
+            # trained before this fix. See weekly_retrain_ultra_fast.py / diagnose_model_bias.py.
+            self.decision_threshold_up = 0.5
+            try:
+                import json as _json_dt
+                _dt_path = os.path.join(os.path.dirname(self.model_path), 'decision_threshold.json')
+                if os.path.exists(_dt_path):
+                    with open(_dt_path) as _f:
+                        _v = _json_dt.load(_f).get('p_up_threshold')
+                    if isinstance(_v, (int, float)) and 0.0 < _v < 1.0:
+                        self.decision_threshold_up = float(_v)
+                        safe_print(f"📊 P(Up) decision threshold: {self.decision_threshold_up:.3f}")
+            except Exception as _e:  # noqa: BLE001
+                print(f"[INFO] Could not load decision threshold ({_e}); using 0.5")
         except FileNotFoundError as e:
             safe_print(f"❌ Error loading model artifacts: {e}")
             print("Please ensure the model has been trained and saved.")
@@ -957,20 +973,29 @@ class TradingSignalPredictor:
         # Scale features
         X_scaled = self.scaler.transform(X)
         # Make predictions
-        predictions = self.model.predict(X_scaled)
         probabilities = self.model.predict_proba(X_scaled)
         # Create results DataFrame
         sector_cols = ['sector'] if 'sector' in latest_data.columns else []
         results = latest_data[['trading_date', 'ticker', 'company', 'close_price', 'RSI'] + sector_cols].copy()
-        results['predicted_signal'] = self.target_encoder.inverse_transform(predictions)
-        results['confidence'] = probabilities.max(axis=1)
-        # Up/Down probabilities (class order from encoder)
+        # Decide direction by thresholding P(Up) instead of argmax@0.5. With the tuned
+        # threshold this undoes the sigmoid base-rate collapse that labeled ~94% of tickers
+        # 'Up' (Jun 2026 fix); with the default 0.5 it is exactly argmax. Confidence is the
+        # probability of the called direction.
         up_idx = np.where(self.target_encoder.classes_ == 'Up')[0]
         down_idx = np.where(self.target_encoder.classes_ == 'Down')[0]
         if len(up_idx) == 1 and len(down_idx) == 1:
-            results['up_probability'] = probabilities[:, up_idx[0]]
-            results['down_probability'] = probabilities[:, down_idx[0]]
+            p_up = probabilities[:, up_idx[0]]
+            p_down = probabilities[:, down_idx[0]]
+            is_up = p_up >= self.decision_threshold_up
+            results['predicted_signal'] = np.where(is_up, 'Up', 'Down')
+            results['up_probability'] = p_up
+            results['down_probability'] = p_down
+            results['confidence'] = np.where(is_up, p_up, p_down)
         else:
+            # Encoder without Up/Down classes — fall back to argmax + max-prob confidence
+            predictions = self.model.predict(X_scaled)
+            results['predicted_signal'] = self.target_encoder.inverse_transform(predictions)
+            results['confidence'] = probabilities.max(axis=1)
             results['up_probability'] = np.nan
             results['down_probability'] = np.nan
         # Add confidence flag

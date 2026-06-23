@@ -1,0 +1,19 @@
+{
+  "buy_min_confidence": 0.55,
+  "high_confidence_threshold": 0.58,
+  "sell_max_confidence": 0.99,
+  "sector_confidence_overrides": {
+    "Technology": 0.57,
+    "Healthcare": 0.57
+  },
+  "_meta": {
+    "derived_at": "2026-06-23T13:29:39",
+    "window_days": 180,
+    "model_since": "2026-06-23",
+    "n_outcomes": 0,
+    "source": "ml_prediction_outcomes"
+  },
+  "_warnings": [
+    "Only 0 current-model outcomes since 2026-06-23 (need >= 200); using hardcoded fallback thresholds until more accrue."
+  ]
+}

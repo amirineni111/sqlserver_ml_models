@@ -1,6 +1,12 @@
 """
 Trading Signal Prediction Deployment Script
 
+!!! DEPRECATED / BROKEN (quarantined Jun 2026) !!!
+The live prediction script is `predict_trading_signals.py`. This "_broken" copy uses the
+obsolete 'Oversold (Buy)'/'Overbought (Sell)' label scheme and is not wired into any
+scheduler or import. Kept only for reference. Do not run. See
+[[nasdaq-accuracy-overhaul-june-2026]].
+
 This script provides a production-ready interface for making trading signal predictions
 using the trained Gradient Boosting model.
 
