@@ -440,7 +440,29 @@ def main():
                 log_file_path=str(log_filename),
             )
             return 1
-        
+
+        # Step 1b: NASDAQ market-calendar gate
+        # Skip the whole run (retrain + sentiment + export) when NASDAQ is closed
+        # today (market holiday or weekend), so we don't write predictions for a day
+        # the market never opened. Fails open if the calendar has no entry for today.
+        if not args.check_only:
+            logging.info("=" * 60)
+            logging.info("STEP 1b: NASDAQ MARKET-CALENDAR CHECK")
+            logging.info("=" * 60)
+            try:
+                from market_calendar_check import get_nasdaq_calendar_status
+                cal = get_nasdaq_calendar_status()
+                logging.info(f"📅 {cal.reason}")
+                if not cal.is_trading_day:
+                    logging.info("⏭️ NASDAQ is closed today — skipping retraining, sentiment, and database export.")
+                    db_info = (True, 0)  # nothing to insert; treat as a clean no-op
+                    create_daily_summary(log_filename, data_status, retrain_info, db_info)
+                    logging.info("🎉 Daily automation completed (market closed — no predictions written).")
+                    return 0
+            except Exception as e:
+                # Never let the calendar check itself block a real trading day.
+                logging.warning(f"⚠️ Market-calendar check failed ({e}); proceeding as a trading day.")
+
         if args.check_only:
             logging.info("🏁 Check-only mode completed")
             create_daily_summary(log_filename, data_status, retrain_info, db_info)

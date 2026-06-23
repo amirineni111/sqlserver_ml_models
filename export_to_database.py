@@ -197,10 +197,27 @@ class DatabaseExporter:
             conn.commit()
 
 
-    def export_predictions_to_db(self, ticker=None, confidence_threshold=0.5):
-        """Export predictions to database"""
+    def export_predictions_to_db(self, ticker=None, confidence_threshold=0.5, skip_on_holiday=True):
+        """Export predictions to database.
+
+        When ``skip_on_holiday`` is True (default), the export is skipped entirely if
+        NASDAQ is closed today (market holiday or weekend) per dbo.market_calendar,
+        so we never insert predictions for a non-trading day. Fails open if the
+        calendar has no entry for today.
+        """
+        if skip_on_holiday:
+            try:
+                from market_calendar_check import get_nasdaq_calendar_status
+                cal = get_nasdaq_calendar_status()
+                if not cal.is_trading_day:
+                    print(f"[SKIP] {cal.reason} — not inserting predictions for a non-trading day.")
+                    return True  # clean no-op, not a failure
+                print(f"[CALENDAR] {cal.reason}")
+            except Exception as e:
+                print(f"[WARN] Market-calendar check failed ({e}); proceeding as a trading day.")
+
         print("[PROCESSING] Generating predictions for database export...")
-        
+
         # Generate run timestamp
         run_timestamp = datetime.now()
         
@@ -476,6 +493,8 @@ def main():
     parser.add_argument('--summary', action='store_true', help='Show latest run summary')
     parser.add_argument('--start-date', type=str, help='Start date for query (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date for query (YYYY-MM-DD)')
+    parser.add_argument('--ignore-holiday', action='store_true',
+                        help='Insert even if NASDAQ is closed today (bypass market_calendar gate)')
     
     args = parser.parse_args()
     
@@ -506,7 +525,8 @@ def main():
         # Default: Export to database
         success = exporter.export_predictions_to_db(
             ticker=args.ticker,
-            confidence_threshold=args.confidence
+            confidence_threshold=args.confidence,
+            skip_on_holiday=not args.ignore_holiday
         )
         
         if success:

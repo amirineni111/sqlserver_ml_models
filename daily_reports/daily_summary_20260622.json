@@ -1,0 +1,176 @@
+{
+  "date": "2026-06-22T18:55:06.601927",
+  "log_file": "logs\\daily_automation_20260622_184502.log",
+  "data_status": {
+    "connected": true,
+    "age_days": 0,
+    "latest_date": "2026-06-22",
+    "total_records": 2369230
+  },
+  "retraining": {
+    "performed": false,
+    "success": null,
+    "duration_minutes": null,
+    "reason": "Skipping retrain (data age: 0 days). Use --force-retrain or weekly schedule."
+  },
+  "database_export": {
+    "success": true,
+    "records_inserted": 2227
+  },
+  "live_accuracy": {
+    "rolling_20d": {
+      "window_trading_days": 20,
+      "n_predictions": 21595,
+      "n_suppressed": 3638,
+      "suppressed_accuracy": 0.4046,
+      "accuracy": 0.5336,
+      "buy_accuracy": 0.6704,
+      "buy_n": 7206,
+      "sell_accuracy": 0.4651,
+      "sell_n": 14389,
+      "by_confidence": {
+        "<55%": {
+          "n": 10075,
+          "accuracy": 0.4964
+        },
+        "55-60%": {
+          "n": 4555,
+          "accuracy": 0.5054
+        },
+        "60-67%": {
+          "n": 3922,
+          "accuracy": 0.6086
+        },
+        ">=67%": {
+          "n": 3043,
+          "accuracy": 0.6024
+        }
+      },
+      "by_sector": {
+        "Basic Materials": {
+          "n": 1222,
+          "accuracy": 0.4615
+        },
+        "Communication Services": {
+          "n": 1080,
+          "accuracy": 0.4926
+        },
+        "Consumer Cyclical": {
+          "n": 2476,
+          "accuracy": 0.5032
+        },
+        "Consumer Defensive": {
+          "n": 1026,
+          "accuracy": 0.5253
+        },
+        "Energy": {
+          "n": 798,
+          "accuracy": 0.5777
+        },
+        "Financial Services": {
+          "n": 3803,
+          "accuracy": 0.5519
+        },
+        "Healthcare": {
+          "n": 3119,
+          "accuracy": 0.5518
+        },
+        "Industrials": {
+          "n": 2907,
+          "accuracy": 0.5421
+        },
+        "Real Estate": {
+          "n": 1297,
+          "accuracy": 0.5991
+        },
+        "Technology": {
+          "n": 3094,
+          "accuracy": 0.4832
+        },
+        "Utilities": {
+          "n": 743,
+          "accuracy": 0.6743
+        }
+      },
+      "first_date": "2026-05-15",
+      "last_date": "2026-06-12"
+    },
+    "rolling_60d": {
+      "window_trading_days": 60,
+      "n_predictions": 117984,
+      "n_suppressed": 3731,
+      "suppressed_accuracy": 0.3948,
+      "accuracy": 0.5112,
+      "buy_accuracy": 0.5833,
+      "buy_n": 44962,
+      "sell_accuracy": 0.4669,
+      "sell_n": 73022,
+      "by_confidence": {
+        "<55%": {
+          "n": 45215,
+          "accuracy": 0.5031
+        },
+        "55-60%": {
+          "n": 32155,
+          "accuracy": 0.5019
+        },
+        "60-67%": {
+          "n": 27179,
+          "accuracy": 0.5249
+        },
+        ">=67%": {
+          "n": 13435,
+          "accuracy": 0.5334
+        }
+      },
+      "by_sector": {
+        "Basic Materials": {
+          "n": 6641,
+          "accuracy": 0.4918
+        },
+        "Communication Services": {
+          "n": 5497,
+          "accuracy": 0.495
+        },
+        "Consumer Cyclical": {
+          "n": 12647,
+          "accuracy": 0.5246
+        },
+        "Consumer Defensive": {
+          "n": 5331,
+          "accuracy": 0.4924
+        },
+        "Energy": {
+          "n": 6076,
+          "accuracy": 0.4951
+        },
+        "Financial Services": {
+          "n": 20246,
+          "accuracy": 0.4812
+        },
+        "Healthcare": {
+          "n": 16779,
+          "accuracy": 0.4951
+        },
+        "Industrials": {
+          "n": 15794,
+          "accuracy": 0.5314
+        },
+        "Real Estate": {
+          "n": 6840,
+          "accuracy": 0.531
+        },
+        "Technology": {
+          "n": 17946,
+          "accuracy": 0.5417
+        },
+        "Utilities": {
+          "n": 4017,
+          "accuracy": 0.5467
+        }
+      },
+      "first_date": "2026-03-19",
+      "last_date": "2026-06-12"
+    }
+  }
+}
