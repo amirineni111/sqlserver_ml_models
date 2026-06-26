@@ -79,8 +79,12 @@ def evaluate_fold(model_factory, X, y, y_return, dates, train_dates, cal_dates,
     X_cal_s = scaler.transform(X_cal)
     X_test_s = scaler.transform(X_test)
 
-    # Class balance * time recency weights (rows are date-sorted)
+    # Class balance * time recency * Down-class boost (mirrors production training)
+    import os as _os
+    down_boost = float(_os.getenv('DOWN_CLASS_WEIGHT_BOOST', '1.3'))
     class_weights = compute_sample_weight('balanced', y_train)
+    if down_boost != 1.0:
+        class_weights[y_train == 0] *= down_boost
     pos = np.arange(len(y_train)) / len(y_train)
     time_weights = np.exp(1.2 * (pos - 1))
     sample_weights = class_weights * time_weights

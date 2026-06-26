@@ -1,0 +1,74 @@
+{
+  "run_at": "2026-06-26T09:21:10.205704",
+  "dead_zone_pct": 0.0,
+  "folds": 2,
+  "test_window": 15,
+  "models": {
+    "Hist Gradient Boosting": {
+      "mean_accuracy": 0.5182,
+      "std_accuracy": 0.014,
+      "folds": [
+        {
+          "n_test": 32287,
+          "accuracy": 0.5322,
+          "accuracy_ex_dead_zone": 0.5322,
+          "f1_weighted": 0.4881,
+          "test_start": "2026-05-06",
+          "test_end": "2026-05-27",
+          "by_confidence": {
+            "<55%": {
+              "n": 32286,
+              "accuracy": 0.5322
+            }
+          },
+          "by_side": {
+            "buy": {
+              "n": 25624,
+              "accuracy": 0.5187
+            },
+            "sell": {
+              "n": 6663,
+              "accuracy": 0.5838
+            }
+          }
+        },
+        {
+          "n_test": 32186,
+          "accuracy": 0.5042,
+          "accuracy_ex_dead_zone": 0.5042,
+          "f1_weighted": 0.5045,
+          "test_start": "2026-05-28",
+          "test_end": "2026-06-17",
+          "by_confidence": {
+            "<55%": {
+              "n": 23364,
+              "accuracy": 0.4739
+            },
+            "55-60%": {
+              "n": 7109,
+              "accuracy": 0.5715
+            },
+            "60-67%": {
+              "n": 1674,
+              "accuracy": 0.6404
+            },
+            ">=67%": {
+              "n": 39,
+              "accuracy": 0.5641
+            }
+          },
+          "by_side": {
+            "buy": {
+              "n": 16109,
+              "accuracy": 0.5257
+            },
+            "sell": {
+              "n": 16077,
+              "accuracy": 0.4827
+            }
+          }
+        }
+      ]
+    }
+  }
+}

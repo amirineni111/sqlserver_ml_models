@@ -740,6 +740,68 @@ class TradingSignalPredictor:
             df_features['pe_vs_sector_median'] = 1.0
 
         # ================================================================
+        # PHASE 5b: Interaction + market-neutral features
+        # Mirrors weekly_retrain_ultra_fast.py engineer_features_vectorized()
+        # ================================================================
+        df_features = df_features.copy()  # defragment before adding columns
+
+        df_features['rsi_strength'] = (df_features['RSI'] - 50) / 50.0 if 'RSI' in df_features.columns else 0.0
+
+        if 'sector' in df_features.columns and 'RSI' in df_features.columns:
+            _sec_rsi = df_features.groupby(['trading_date', 'sector'])['RSI'].transform('mean')
+            df_features['rsi_vs_sector_avg'] = df_features['RSI'] - _sec_rsi
+        else:
+            df_features['rsi_vs_sector_avg'] = 0.0
+
+        if 'beta' in df_features.columns and 'alpha_vs_nasdaq_5d' in df_features.columns:
+            _safe_beta = df_features['beta'].clip(lower=0.2, upper=5.0).fillna(1.0)
+            df_features['beta_adjusted_alpha'] = df_features['alpha_vs_nasdaq_5d'] / _safe_beta
+        else:
+            df_features['beta_adjusted_alpha'] = 0.0
+
+        if 'volume_sma_ratio' in df_features.columns and 'sector' in df_features.columns:
+            _sec_vol_mean = df_features.groupby(['trading_date', 'sector'])['volume_sma_ratio'].transform('mean')
+            _sec_vol_std = df_features.groupby(['trading_date', 'sector'])['volume_sma_ratio'].transform('std').clip(lower=0.01)
+            df_features['volume_anomaly'] = (df_features['volume_sma_ratio'] - _sec_vol_mean) / _sec_vol_std
+        else:
+            df_features['volume_anomaly'] = 0.0
+
+        if 'vix_close' in df_features.columns and 'alpha_vs_nasdaq_5d' in df_features.columns:
+            df_features['outperformance_in_fear'] = (
+                df_features['alpha_vs_nasdaq_5d'] * (df_features['vix_close'].fillna(20) / 15.0).clip(upper=4.0)
+            )
+        else:
+            df_features['outperformance_in_fear'] = 0.0
+
+        df_features['sector_leader_conviction'] = df_features['rsi_strength'] * df_features['volume_anomaly'].clip(-3, 3)
+
+        if 'beta' in df_features.columns and 'vix_close' in df_features.columns:
+            df_features['defensive_risk_score'] = (
+                df_features['beta'].clip(-3, 5).fillna(1.0) * (df_features['vix_close'].fillna(20) / 20.0).clip(upper=3.0)
+            )
+        else:
+            df_features['defensive_risk_score'] = 0.0
+
+        if 'sp500_return_1d' in df_features.columns and 'alpha_vs_nasdaq_5d' in df_features.columns:
+            df_features['contrarian_strength'] = np.where(
+                df_features['sp500_return_1d'] < 0, df_features['alpha_vs_nasdaq_5d'], 0.0
+            )
+        else:
+            df_features['contrarian_strength'] = 0.0
+
+        if 'vix_close' in df_features.columns:
+            df_features['quality_in_volatility'] = df_features['rsi_strength'] * np.maximum(0, df_features['vix_close'].fillna(20) - 20)
+        else:
+            df_features['quality_in_volatility'] = 0.0
+
+        if 'alpha_vs_sector_5d' in df_features.columns and 'nasdaq_comp_return_1d' in df_features.columns:
+            df_features['sector_momentum_confirmed'] = (
+                df_features['alpha_vs_sector_5d'] * df_features['nasdaq_comp_return_1d'].fillna(0)
+            )
+        else:
+            df_features['sector_momentum_confirmed'] = 0.0
+
+        # ================================================================
         # PHASE 6: Sentiment-price divergence
         # Detects when sentiment and price direction disagree.
         # ================================================================

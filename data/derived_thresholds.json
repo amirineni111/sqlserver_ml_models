@@ -7,13 +7,13 @@
     "Healthcare": 0.57
   },
   "_meta": {
-    "derived_at": "2026-06-23T13:29:39",
+    "derived_at": "2026-06-26T09:59:57",
     "window_days": 180,
-    "model_since": "2026-06-23",
+    "model_since": "2026-06-26",
     "n_outcomes": 0,
     "source": "ml_prediction_outcomes"
   },
   "_warnings": [
-    "Only 0 current-model outcomes since 2026-06-23 (need >= 200); using hardcoded fallback thresholds until more accrue."
+    "Only 0 current-model outcomes since 2026-06-26 (need >= 200); using hardcoded fallback thresholds until more accrue."
   ]
 }
