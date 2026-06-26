@@ -1097,6 +1097,87 @@ class UltraFastWeeklyRetrainer:
               f"rs_rank_52wk, fundamental_quality_score, pe_vs_sector_median")
 
         # ================================================================
+        # ENHANCED MARKET-NEUTRAL + INTERACTION FEATURES (NSE-derived)
+        # These features capture stock-vs-market dynamics rather than
+        # absolute macro state, preventing market-context features from
+        # dominating and improving sell-signal discrimination.
+        # ================================================================
+        print("[FEATURES] Adding interaction + market-neutral features...")
+        # Defragment after many column-by-column merges to avoid PerformanceWarnings
+        df = df.copy()
+
+        # RSI strength: normalized RSI relative to neutral (50) — range -1 to +1
+        df['rsi_strength'] = (df['RSI'] - 50) / 50.0
+
+        # RSI vs sector average: stock momentum relative to same-sector peers
+        if 'sector' in df.columns and 'RSI' in df.columns:
+            _sector_rsi_avg = df.groupby(['trading_date', 'sector'])['RSI'].transform('mean')
+            df['rsi_vs_sector_avg'] = df['RSI'] - _sector_rsi_avg
+        else:
+            df['rsi_vs_sector_avg'] = 0.0
+
+        # Beta-adjusted alpha: alpha after removing market-beta risk
+        if 'beta' in df.columns and 'alpha_vs_nasdaq_5d' in df.columns:
+            _safe_beta = df['beta'].clip(lower=0.2, upper=5.0).fillna(1.0)
+            df['beta_adjusted_alpha'] = df['alpha_vs_nasdaq_5d'] / _safe_beta
+        else:
+            df['beta_adjusted_alpha'] = 0.0
+
+        # Volume anomaly: stock volume-ratio z-scored vs sector peers on same date
+        if 'volume_sma_ratio' in df.columns and 'sector' in df.columns:
+            _sec_vol_mean = df.groupby(['trading_date', 'sector'])['volume_sma_ratio'].transform('mean')
+            _sec_vol_std = df.groupby(['trading_date', 'sector'])['volume_sma_ratio'].transform('std').clip(lower=0.01)
+            df['volume_anomaly'] = (df['volume_sma_ratio'] - _sec_vol_mean) / _sec_vol_std
+        else:
+            df['volume_anomaly'] = 0.0
+
+        # outperformance_in_fear: strong alpha during high-VIX (conviction signal)
+        if 'vix_close' in df.columns and 'alpha_vs_nasdaq_5d' in df.columns:
+            df['outperformance_in_fear'] = (
+                df['alpha_vs_nasdaq_5d'] * (df['vix_close'].fillna(20) / 15.0).clip(upper=4.0)
+            )
+        else:
+            df['outperformance_in_fear'] = 0.0
+
+        # sector_leader_conviction: RSI strength × unusual volume (both firing = leader)
+        df['sector_leader_conviction'] = df['rsi_strength'] * df['volume_anomaly'].clip(-3, 3)
+
+        # defensive_risk_score: high-beta stock in high-fear = elevated downside risk
+        if 'beta' in df.columns and 'vix_close' in df.columns:
+            df['defensive_risk_score'] = (
+                df['beta'].clip(-3, 5).fillna(1.0) * (df['vix_close'].fillna(20) / 20.0).clip(upper=3.0)
+            )
+        else:
+            df['defensive_risk_score'] = 0.0
+
+        # contrarian_strength: alpha on market down-days (mean-reversion signal)
+        if 'sp500_return_1d' in df.columns and 'alpha_vs_nasdaq_5d' in df.columns:
+            df['contrarian_strength'] = np.where(
+                df['sp500_return_1d'] < 0, df['alpha_vs_nasdaq_5d'], 0.0
+            )
+        else:
+            df['contrarian_strength'] = 0.0
+
+        # quality_in_volatility: RSI strength during VIX spikes (quality holds up)
+        if 'vix_close' in df.columns:
+            df['quality_in_volatility'] = df['rsi_strength'] * np.maximum(0, df['vix_close'].fillna(20) - 20)
+        else:
+            df['quality_in_volatility'] = 0.0
+
+        # sector_momentum_confirmed: alpha vs sector × market direction (aligned signal)
+        if 'alpha_vs_sector_5d' in df.columns and 'nasdaq_comp_return_1d' in df.columns:
+            df['sector_momentum_confirmed'] = (
+                df['alpha_vs_sector_5d'] * df['nasdaq_comp_return_1d'].fillna(0)
+            )
+        else:
+            df['sector_momentum_confirmed'] = 0.0
+
+        print("  Interaction/neutral features added: rsi_strength, rsi_vs_sector_avg, "
+              "beta_adjusted_alpha, volume_anomaly, outperformance_in_fear, "
+              "sector_leader_conviction, defensive_risk_score, contrarian_strength, "
+              "quality_in_volatility, sector_momentum_confirmed")
+
+        # ================================================================
         # SENTIMENT-PRICE DIVERGENCE
         # Detects when sentiment is negative but price looks bullish (or vice versa)
         # Key signal for catching sector-wide downturns the model might miss.
@@ -1200,37 +1281,55 @@ class UltraFastWeeklyRetrainer:
         print(f"  Balance: {balance}")
 
         # ================================================================
-        # FEATURE SELECTION (STRATIFIED: market-wide + stock-specific)
+        # FEATURE SELECTION (4-CATEGORY WEIGHTED: NSE-derived approach)
+        # Category caps prevent macro features from dominating at the
+        # expense of stock-specific alpha. Inspired by NSE model's
+        # 15/35/35/15 split that boosted test accuracy from 54% to 70%.
         # ================================================================
-        print("[PREP] Running STRATIFIED feature selection (mutual_info_classif)...")
+        print("[PREP] Running 4-CATEGORY WEIGHTED feature selection (mutual_info_classif)...")
         try:
-            # Define market-wide feature patterns (same for all stocks on a given day)
-            MARKET_WIDE_PATTERNS = [
-                'vix_close', 'vix_change_pct', 'sp500_return_1d', 'sp500_close',
-                'nasdaq_comp_return_1d', 'nasdaq_comp_close',
-                'dxy_return_1d', 'dxy_close',
+            # Category 1: Pure market-context (same for every stock on a given day)
+            MARKET_CONTEXT_FEATURES = [
+                'vix_close', 'vix_change_pct', 'sp500_return_1d',
+                'nasdaq_comp_return_1d', 'dxy_return_1d',
                 'us_10y_yield_close', 'us_10y_yield_change',
-                'xlk_return_1d', 'xlf_return_1d', 'xle_return_1d', 'xlv_return_1d',
-                'xli_return_1d', 'xlc_return_1d', 'xly_return_1d', 'xlp_return_1d',
-                'xlb_return_1d', 'xlre_return_1d', 'xlu_return_1d',
                 'sector_etf_return_1d',
                 'trading_days_in_week', 'day_of_week', 'month',
                 'is_pre_holiday', 'is_post_holiday', 'is_short_week',
                 'is_month_end', 'is_month_start', 'is_quarter_end',
                 'is_options_expiry', 'days_until_next_holiday',
                 'days_since_last_holiday', 'other_market_closed',
-                # Sector sentiment features (from nasdaq_sector_sentiment)
+                # Sector sentiment (sector-level context, not stock-specific)
                 'sector_sentiment_score', 'sector_sentiment_confidence',
                 'sector_sentiment_momentum_3d', 'sector_sentiment_momentum_7d',
                 'sector_sentiment_vs_avg_30d',
                 'sector_positive_ratio', 'sector_negative_ratio',
                 'sector_news_volume', 'market_sentiment_score',
-                'sentiment_price_divergence',
             ]
-            market_features = [f for f in feature_cols if f in MARKET_WIDE_PATTERNS]
-            stock_features = [f for f in feature_cols if f not in MARKET_WIDE_PATTERNS]
-            print(f"  Market-wide features: {len(market_features)}")
-            print(f"  Stock-specific features: {len(stock_features)}")
+            # Category 2: Market-neutral / relative features (stock vs market/sector)
+            RELATIVE_NEUTRAL_FEATURES = [
+                'alpha_vs_nasdaq_5d', 'alpha_vs_nasdaq_20d', 'alpha_vs_sector_5d',
+                'rs_rank_52wk', 'beta_adjusted_alpha', 'rsi_vs_sector_avg',
+                'volume_anomaly', 'sentiment_price_divergence',
+                'fundamental_quality_score', 'pe_vs_sector_median',
+            ]
+            # Category 3: Interaction features (cross-signal combinations)
+            INTERACTION_FEATURES = [
+                'outperformance_in_fear', 'sector_leader_conviction',
+                'defensive_risk_score', 'contrarian_strength',
+                'quality_in_volatility', 'sector_momentum_confirmed',
+            ]
+            # Category 4: Stock-specific (technical + fundamental, anything else)
+            all_categorized = set(MARKET_CONTEXT_FEATURES + RELATIVE_NEUTRAL_FEATURES + INTERACTION_FEATURES)
+            stock_specific = [f for f in feature_cols if f not in all_categorized]
+
+            market_features = [f for f in feature_cols if f in MARKET_CONTEXT_FEATURES]
+            relative_features = [f for f in feature_cols if f in RELATIVE_NEUTRAL_FEATURES]
+            interaction_feats = [f for f in feature_cols if f in INTERACTION_FEATURES]
+
+            print(f"  Category sizes: market={len(market_features)}, "
+                  f"relative={len(relative_features)}, interaction={len(interaction_feats)}, "
+                  f"stock-specific={len(stock_specific)}")
 
             # Compute MI scores on the TRAIN slice only — scoring on the full
             # dataset would let the selector see test-period feature-target
@@ -1243,21 +1342,36 @@ class UltraFastWeeklyRetrainer:
             )
             mi_all = pd.Series(mi_scores_all, index=feature_cols).sort_values(ascending=False)
 
+            # 4-category weighted selection (caps prevent macro dominance)
+            # Market context ≤4, Relative ≤8, Interaction ≤4, Stock-specific ≤10 → max 26
+            n_market = min(4, len(market_features))
+            n_relative = min(8, len(relative_features))
+            n_interaction = min(4, len(interaction_feats))
+            n_stock = min(10, len(stock_specific))
+
             mi_market = mi_all[mi_all.index.isin(market_features)].sort_values(ascending=False)
-            mi_stock = mi_all[mi_all.index.isin(stock_features)].sort_values(ascending=False)
+            mi_relative = mi_all[mi_all.index.isin(relative_features)].sort_values(ascending=False)
+            mi_interaction = mi_all[mi_all.index.isin(interaction_feats)].sort_values(ascending=False)
+            mi_stock = mi_all[mi_all.index.isin(stock_specific)].sort_values(ascending=False)
 
-            # Stratified selection: top-8 market + top-25 stock = 33 features
-            # n_stock raised from 22 to 25 to give room for the new alpha features
-            n_market = min(8, len(mi_market))
-            n_stock = min(25, len(mi_stock))
             selected_market = mi_market.head(n_market).index.tolist()
-            selected_stock = mi_stock.head(n_stock).index.tolist()
-            selected_features = selected_stock + selected_market  # stock-specific first
+            selected_relative = mi_relative.head(n_relative).index.tolist()
+            selected_interaction = mi_interaction.head(n_interaction).index.tolist()
+            selected_stock_sp = mi_stock.head(n_stock).index.tolist()
 
-            print(f"\n  Selected {len(selected_stock)} stock-specific features:")
-            for i, feat in enumerate(selected_stock):
+            # Build final list: stock-specific → relative → interaction → market
+            selected_features = selected_stock_sp + selected_relative + selected_interaction + selected_market
+
+            print(f"\n  Selected {len(selected_stock_sp)} stock-specific features:")
+            for i, feat in enumerate(selected_stock_sp):
                 print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
-            print(f"\n  Selected {len(selected_market)} market-wide features:")
+            print(f"\n  Selected {len(selected_relative)} relative/neutral features:")
+            for i, feat in enumerate(selected_relative):
+                print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
+            print(f"\n  Selected {len(selected_interaction)} interaction features:")
+            for i, feat in enumerate(selected_interaction):
+                print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
+            print(f"\n  Selected {len(selected_market)} market-context features:")
             for i, feat in enumerate(selected_market):
                 print(f"    {i+1:2d}. {feat} (MI={mi_all[feat]:.4f})")
 
@@ -1373,10 +1487,17 @@ class UltraFastWeeklyRetrainer:
             )
         }
 
-        # Sample weights: class balance * time recency (rows are date-sorted,
-        # so positional time weights track trading dates). The dead-zone
-        # filter shifts class balance, which the balanced weights absorb.
+        # Sample weights: class balance * time recency * optional Down-class boost.
+        # DOWN_CLASS_WEIGHT_BOOST > 1.0 amplifies Sell-signal training weight
+        # to counter the model's persistent Up-bias (live sell acc ~46% = worse
+        # than random). Down = class 0 (LabelEncoder alphabetical: Down < Up).
+        down_boost = float(os.getenv('DOWN_CLASS_WEIGHT_BOOST', '1.3'))
         class_weights = compute_sample_weight('balanced', y_train)
+        if down_boost != 1.0:
+            down_mask = (y_train == 0)
+            class_weights[down_mask] *= down_boost
+            print(f"  Down-class weight boost: {down_boost}x "
+                  f"({down_mask.sum():,} Down samples boosted)")
         n_train = len(y_train)
         time_positions = np.arange(n_train) / n_train
         decay_rate = 1.2
@@ -1559,11 +1680,43 @@ class UltraFastWeeklyRetrainer:
         except Exception as e:
             print(f"  [WARN] Calibration skipped: {e}")
 
+        # Decision-threshold tuning on P(Up). Platt scaling on a low-edge model collapses
+        # calibrated probabilities toward the class base rate (~0.55 Up), so argmax@0.5
+        # labels ~94% of tickers 'Up' and confidence compresses into 0.50-0.60 (Jun 2026
+        # diagnosis, diagnose_model_bias.py). Pick the P(Up) cut that maximizes BALANCED
+        # accuracy on the held-out calibration split — restores a sane Buy/Sell mix and a
+        # meaningful operating point. Saved to data/decision_threshold.json and consumed by
+        # predict_trading_signals.py (defaults to 0.5 when absent).
+        decision_threshold_up = 0.5
+        try:
+            up_idx = list(best_model.classes_).index(1) if 1 in list(best_model.classes_) else 1
+            p_up_cal = best_model.predict_proba(X_cal_scaled)[:, up_idx]
+            y_up_cal = (y_cal == 1).astype(int)
+            best_bal, best_thr = -1.0, 0.5
+            for thr in np.round(np.arange(0.30, 0.71, 0.005), 4):
+                pred_up = (p_up_cal >= thr).astype(int)
+                tp = int(((pred_up == 1) & (y_up_cal == 1)).sum())
+                fn = int(((pred_up == 0) & (y_up_cal == 1)).sum())
+                tn = int(((pred_up == 0) & (y_up_cal == 0)).sum())
+                fp = int(((pred_up == 1) & (y_up_cal == 0)).sum())
+                tpr = tp / (tp + fn) if (tp + fn) else 0.0
+                tnr = tn / (tn + fp) if (tn + fp) else 0.0
+                bal = (tpr + tnr) / 2.0
+                if bal > best_bal:
+                    best_bal, best_thr = bal, float(thr)
+            decision_threshold_up = best_thr
+            up_share = float((p_up_cal >= best_thr).mean())
+            print(f"[THRESHOLD] Tuned P(Up) decision threshold = {best_thr:.3f} "
+                  f"(balanced acc={best_bal:.3f}, calls {up_share:.1%} Up on calibration split)")
+        except Exception as e:
+            print(f"  [WARN] Decision-threshold tuning skipped, using 0.5: {e}")
+
         return {
             'model_results': model_results,
             'trained_models': trained_models,
             'best_model_name': best_model_name,
             'best_model': best_model,
+            'decision_threshold_up': decision_threshold_up,
             'scaler': scaler,
             'feature_columns': feature_cols,
             'X_train': X_train,
@@ -1758,6 +1911,7 @@ class UltraFastWeeklyRetrainer:
             'days_back': self.days_back,
             'target': '5-day price direction (Up/Down)',
             'calibration_method': 'sigmoid (Platt scaling)',
+            'decision_threshold_up': clf_results.get('decision_threshold_up', 0.5),
             'label_dead_zone_pct': clf_results.get('dead_zone_pct'),
             'dead_zone_samples_dropped': clf_results.get('dead_zone_dropped'),
             'split_date_ranges': clf_results.get('split_date_ranges'),
@@ -1782,7 +1936,28 @@ class UltraFastWeeklyRetrainer:
         with open(self.data_dir / 'training_metadata.pkl', 'wb') as f:
             pickle.dump(metadata, f)
 
+        # Decision threshold for the predictor (P(Up) cut tuned on the calibration split).
+        import json as _json_dt
+        with open(self.data_dir / 'decision_threshold.json', 'w') as f:
+            _json_dt.dump({
+                'p_up_threshold': float(clf_results.get('decision_threshold_up', 0.5)),
+                'model_training_timestamp': self.timestamp,
+                'note': 'Tuned for balanced accuracy on the calibration split; see weekly_retrain_ultra_fast.py',
+            }, f, indent=2)
+
         print(f"[SAVE] All artifacts saved to {self.data_dir}/")
+
+        # Reset outcome-driven thresholds for the new model. The prior model's derived
+        # gates are stale (and may be out of the new calibration's confidence range — the
+        # bug that zeroed out buys in Jun 2026). With no current-model outcomes yet this
+        # regenerates derived_thresholds.json to the hardcoded fallback; the daily
+        # evaluation job re-derives real gates as outcomes accrue. Best-effort: never let
+        # this block a retrain.
+        try:
+            from derive_thresholds import derive_and_save
+            derive_and_save()
+        except Exception as e:  # noqa: BLE001
+            print(f"[SAVE] Threshold reset skipped: {e}")
 
     # ================================================================
     # MAIN PIPELINE
