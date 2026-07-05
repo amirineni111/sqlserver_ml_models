@@ -1,5 +1,5 @@
 {
-  "p_up_threshold": 0.54,
-  "model_training_timestamp": "20260626_092149",
+  "p_up_threshold": 0.52,
+  "model_training_timestamp": "20260705_161511",
   "note": "Tuned for balanced accuracy on the calibration split; see weekly_retrain_ultra_fast.py"
 }

@@ -35,6 +35,26 @@ class IsotonicCalibratedClassifier:
         return self.classes_[np.argmax(proba, axis=1)]
 
 
+class PreFittedEnsemble:
+    """Simple averaging ensemble from already-trained regression models.
+
+    Defined at module level here (not inside the retrain script) so joblib
+    pickles it by importable reference — pickled from a script run as
+    __main__, it would otherwise fail to load in any other process.
+    """
+
+    def __init__(self, models_dict):
+        self.models = list(models_dict.values())
+        self.model_names = list(models_dict.keys())
+
+    def predict(self, X):
+        preds = np.column_stack([m.predict(X) for m in self.models])
+        return preds.mean(axis=1)
+
+    def get_params(self, deep=True):
+        return {'models_dict': dict(zip(self.model_names, self.models))}
+
+
 class SigmoidCalibratedClassifier:
     """Probability calibrator using Platt scaling on a held-out set.
 

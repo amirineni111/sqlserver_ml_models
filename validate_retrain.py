@@ -95,17 +95,18 @@ print("=" * 60)
 
 try:
     from predict_trading_signals import TradingSignalPredictor
-    predictor = TradingSignalPredictor()
-    predictor.load_model()
+    predictor = TradingSignalPredictor()  # loads model artifacts in __init__
 
-    # Predict for a small sample
+    # Predict for a small sample (predict_signals takes one ticker at a time)
     with pyodbc.connect(conn_str) as conn:
         tickers_df = pd.read_sql(
-            "SELECT TOP 20 ticker FROM dbo.nasdaq_top100 ORDER BY ticker", conn
+            "SELECT TOP 5 ticker FROM dbo.nasdaq_top100 ORDER BY ticker", conn
         )
     tickers = tickers_df['ticker'].tolist()
 
-    results = predictor.predict_signals(tickers)
+    frames = [predictor.predict_signals(t) for t in tickers]
+    frames = [f for f in frames if f is not None and not f.empty]
+    results = pd.concat(frames, ignore_index=True) if frames else None
 
     if results is not None and not results.empty:
         print(f"  Rows returned (before filter): {len(results)}")

@@ -52,7 +52,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.isotonic import IsotonicRegression
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.utils.class_weight import compute_sample_weight
-from model_calibration import IsotonicCalibratedClassifier, SigmoidCalibratedClassifier  # noqa: F401 — Isotonic kept for joblib backward compat
+from model_calibration import IsotonicCalibratedClassifier, SigmoidCalibratedClassifier, PreFittedEnsemble  # noqa: F401 — Isotonic kept for joblib backward compat
 from nasdaq_config import LABEL_DEAD_ZONE_PCT
 
 # Add src to path
@@ -90,7 +90,6 @@ class PurgedTimeSeriesSplit:
 
     def get_n_splits(self, X=None, y=None, groups=None):
         return self.n_splits
-
 
 
 class UltraFastWeeklyRetrainer:
@@ -1807,17 +1806,6 @@ class UltraFastWeeklyRetrainer:
         # Regression ensemble — use pre-fitted models (skip expensive re-training)
         print("  Creating Regression Ensemble (from pre-fitted models)...")
         try:
-            class PreFittedEnsemble:
-                """Simple averaging ensemble from already-trained models."""
-                def __init__(self, models_dict):
-                    self.models = list(models_dict.values())
-                    self.model_names = list(models_dict.keys())
-                def predict(self, X):
-                    preds = np.column_stack([m.predict(X) for m in self.models])
-                    return preds.mean(axis=1)
-                def get_params(self, deep=True):
-                    return {'models_dict': dict(zip(self.model_names, self.models))}
-
             reg_ensemble = PreFittedEnsemble(trained_models)
             y_pred_ens = reg_ensemble.predict(X_test_scaled)
             ens_mae = mean_absolute_error(y_test, y_pred_ens)
@@ -1863,10 +1851,33 @@ class UltraFastWeeklyRetrainer:
             path = self.data_dir / f'clf_{safe_name}.joblib'
             joblib.dump(model, path)
 
-        # Save best regression model
+        # Save best regression model. Must never abort the run: a failed dump here
+        # (e.g. an unpicklable model) would leave classifier artifacts half-written
+        # and desynced from scaler/selected_features saved below.
         reg_path = self.data_dir / 'best_regressor.joblib'
-        joblib.dump(reg_results['best_model'], reg_path)
-        print(f"  [OK] Best regressor -> {reg_path}")
+        try:
+            joblib.dump(reg_results['best_model'], reg_path)
+            print(f"  [OK] Best regressor -> {reg_path}")
+        except Exception as e:
+            reg_path.unlink(missing_ok=True)  # dump leaves a truncated file behind
+            print(f"  [WARN] Could not save best regressor '{reg_results['best_model_name']}': {e}")
+            fallback = sorted(
+                (
+                    (name, model)
+                    for name, model in reg_results['trained_models'].items()
+                    if name != reg_results['best_model_name']
+                ),
+                key=lambda nm: reg_results['model_results'][nm[0]]['direction_accuracy'],
+                reverse=True,
+            )
+            for name, model in fallback:
+                try:
+                    joblib.dump(model, reg_path)
+                    print(f"  [OK] Fallback regressor '{name}' -> {reg_path}")
+                    break
+                except Exception as fe:
+                    reg_path.unlink(missing_ok=True)
+                    print(f"  [WARN] Fallback '{name}' also unpicklable: {fe}")
 
         # Save all regression models (skip unpicklable custom ensembles)
         for name, model in reg_results['trained_models'].items():

@@ -37,15 +37,21 @@ echo.
 REM Create backup directory if it doesn't exist
 if not exist "data\backups" mkdir "data\backups"
 
+REM Capture retrain output to a timestamped log (Task Scheduler runs headless)
+if not exist "logs" mkdir "logs"
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set RUN_TS=%%i
+set LOG_FILE=logs\weekly_retrain_%RUN_TS%.log
+
 REM Run the ULTRA-FAST weekly model retraining (uses vectorized operations)
 echo [INFO] Running ULTRA-FAST weekly model retraining...
-%PYTHON_EXE% weekly_retrain_ultra_fast.py
+echo [INFO] Logging to %LOG_FILE%
+%PYTHON_EXE% weekly_retrain_ultra_fast.py >> "%LOG_FILE%" 2>&1
 
 REM Check if retraining was successful
 if errorlevel 1 (
     echo.
     echo [ERROR] Weekly model retraining failed!
-    echo Check the output above for details.
+    echo Check %LOG_FILE% for details.
     echo.
     exit /b 1
 )
