@@ -33,6 +33,14 @@ from database.connection import SQLServerConnection
 # Import the predictor
 from predict_trading_signals import TradingSignalPredictor
 
+# Single source of truth for what counts as "high confidence". Before Sep 2026 this
+# module hardcoded its own thresholds (0.5 for the flag, 0.67/0.55 for signal_strength,
+# 0.7 for the summary count) while nasdaq_config said 0.58 — four disagreeing gates.
+# The 0.5 default in particular made high_confidence fire on every row, because
+# confidence is the probability of the *called* direction and is >= 0.5 by construction.
+from nasdaq_config import HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD
+from model_version import load_model_version
+
 
 class DatabaseExporter:
     """Export trading signals and technical indicators to SQL Server"""
@@ -73,6 +81,7 @@ class DatabaseExporter:
                 buy_probability FLOAT,
                 is_actionable BIT,
                 suppression_reason VARCHAR(100),
+                model_version VARCHAR(50),
                 created_at DATETIME DEFAULT GETDATE(),
                 INDEX IDX_ticker_date (ticker, trading_date),
                 INDEX IDX_run_timestamp (run_timestamp),
@@ -146,6 +155,8 @@ class DatabaseExporter:
                 run_timestamp DATETIME NOT NULL UNIQUE,
                 run_date DATE NOT NULL,
                 total_predictions INT,
+                actionable_predictions INT,
+                suppressed_predictions INT,
                 high_confidence_count INT,
                 medium_confidence_count INT,
                 buy_signals INT,
@@ -184,27 +195,46 @@ class DatabaseExporter:
         """Add suppression-flag columns to a pre-existing predictions table.
 
         Suppressed signals are now written with is_actionable=0 instead of
-        being dropped before export. Idempotent; safe to run every export.
+        being dropped before export. model_version (Sep 2026) records which model
+        produced the row, so drift and calibration can be attributed to a specific
+        retrain instead of inferred from run_timestamp. Idempotent; safe to run
+        every export.
         """
         migration_sql = f"""
         IF COL_LENGTH('{self.predictions_table}', 'is_actionable') IS NULL
             ALTER TABLE {self.predictions_table} ADD is_actionable BIT;
         IF COL_LENGTH('{self.predictions_table}', 'suppression_reason') IS NULL
             ALTER TABLE {self.predictions_table} ADD suppression_reason VARCHAR(100);
+        IF COL_LENGTH('{self.predictions_table}', 'model_version') IS NULL
+            ALTER TABLE {self.predictions_table} ADD model_version VARCHAR(50);
+        IF COL_LENGTH('{self.summary_table}', 'actionable_predictions') IS NULL
+            ALTER TABLE {self.summary_table} ADD actionable_predictions INT;
+        IF COL_LENGTH('{self.summary_table}', 'suppressed_predictions') IS NULL
+            ALTER TABLE {self.summary_table} ADD suppressed_predictions INT;
         """
         with self.engine.connect() as conn:
             conn.execute(text(migration_sql))
             conn.commit()
 
 
-    def export_predictions_to_db(self, ticker=None, confidence_threshold=0.5, skip_on_holiday=True):
+    def export_predictions_to_db(self, ticker=None, confidence_threshold=HIGH_CONFIDENCE_THRESHOLD,
+                                 skip_on_holiday=True):
         """Export predictions to database.
+
+        ``confidence_threshold`` is the gate for the high_confidence flag and MUST
+        stay tied to HIGH_CONFIDENCE_THRESHOLD. It used to default to 0.5, which is
+        below the floor of the confidence scale, so the flag fired on every row and
+        collapsed into a duplicate of is_actionable (Sep 2026 fix).
 
         When ``skip_on_holiday`` is True (default), the export is skipped entirely if
         NASDAQ is closed today (market holiday or weekend) per dbo.market_calendar,
         so we never insert predictions for a non-trading day. Fails open if the
         calendar has no entry for today.
         """
+        if confidence_threshold < MEDIUM_CONFIDENCE_THRESHOLD:
+            print(f"[WARN] high-confidence gate {confidence_threshold} is below the "
+                  f"medium threshold {MEDIUM_CONFIDENCE_THRESHOLD} — the flag will be "
+                  f"near-meaningless. Intended value is {HIGH_CONFIDENCE_THRESHOLD}.")
         if skip_on_holiday:
             try:
                 from market_calendar_check import get_nasdaq_calendar_status
@@ -217,6 +247,10 @@ class DatabaseExporter:
                 print(f"[WARN] Market-calendar check failed ({e}); proceeding as a trading day.")
 
         print("[PROCESSING] Generating predictions for database export...")
+
+        # Guarantee the flag/versioning columns exist before the insert — the export
+        # runs unattended from daily_automation.py and never calls create_tables().
+        self._ensure_predictions_schema()
 
         # Generate run timestamp
         run_timestamp = datetime.now()
@@ -297,12 +331,14 @@ class DatabaseExporter:
         
         # Add calculated fields
         df['confidence_percentage'] = (df['confidence'] * 100).round(1)
-        # Thresholds aligned with filtered signal distribution (May 2026):
-        # Strong >= 67% (effective Buy floor after dead-zone suppression)
-        # Moderate >= 55% (transition zone; no Sell signals survive above this)
-        # Weak < 55% (where all surviving Sell signals land: 50-55% confidence)
+        # Bands are derived from nasdaq_config, not hardcoded (Sep 2026). The old
+        # 0.67/0.55 bands were tuned for the pre-June isotonic model's wider spread
+        # and disagreed with the high_confidence gate, producing rows that read
+        # "high_confidence=True, signal_strength='Weak'". Invariant now:
+        #   signal_strength == 'Strong'  <=>  high_confidence == 1  (on actionable rows)
         df['signal_strength'] = df['confidence'].apply(
-            lambda x: 'Strong' if x >= 0.67 else 'Moderate' if x >= 0.55 else 'Weak'
+            lambda x: 'Strong' if x > HIGH_CONFIDENCE_THRESHOLD
+            else 'Moderate' if x >= MEDIUM_CONFIDENCE_THRESHOLD else 'Weak'
         )
         # Suppressed rows are stored for the outcomes feedback loop but are not
         # tradeable — label them so they can't be mistaken for strong signals
@@ -333,12 +369,20 @@ class DatabaseExporter:
             df['is_actionable'] = df['is_actionable'].astype(bool)
             df['high_confidence'] = df['high_confidence'].astype(bool) & df['is_actionable']
 
+        # Stamp the producing model at write time. Attribution is then exact —
+        # evaluation no longer has to infer it from run_timestamp, and
+        # derive_thresholds.py can select current-model outcomes directly.
+        _, version = load_model_version()
+        if version is None:
+            print("[WARN] data/training_metadata.pkl unreadable — writing NULL model_version")
+        df['model_version'] = version
+
         columns = [
             'run_timestamp', 'trading_date', 'ticker', 'company',
             'predicted_signal', 'confidence', 'confidence_percentage', 'signal_strength',
             'close_price', 'RSI', 'rsi_category', 'high_confidence',
             'sell_probability', 'buy_probability',
-            'is_actionable', 'suppression_reason'
+            'is_actionable', 'suppression_reason', 'model_version'
         ]
         
         return df[[col for col in columns if col in df.columns]]
@@ -415,9 +459,22 @@ class DatabaseExporter:
         summary = {
             'run_timestamp': run_timestamp,
             'run_date': run_timestamp.date(),
+            # buy_signals + sell_signals count ACTIONABLE rows while total_predictions
+            # counts every row, so the two never added up and the table looked broken.
+            # actionable/suppressed make the arithmetic explicit:
+            #   total = actionable + suppressed,  actionable = buy_signals + sell_signals
             'total_predictions': len(predictions_df),
-            'high_confidence_count': len(actionable_df[actionable_df['confidence'] > 0.7]),
-            'medium_confidence_count': len(actionable_df[(actionable_df['confidence'] > 0.6) & (actionable_df['confidence'] <= 0.7)]),
+            'actionable_predictions': len(actionable_df),
+            'suppressed_predictions': len(predictions_df) - len(actionable_df),
+            # Counts must agree with the high_confidence bit on the rows themselves;
+            # these used to hardcode 0.7/0.6 and disagreed with both the flag and
+            # nasdaq_config (Sep 2026 fix).
+            'high_confidence_count': int(actionable_df['high_confidence'].sum())
+                if 'high_confidence' in actionable_df.columns
+                else len(actionable_df[actionable_df['confidence'] > HIGH_CONFIDENCE_THRESHOLD]),
+            'medium_confidence_count': len(actionable_df[
+                (actionable_df['confidence'] >= MEDIUM_CONFIDENCE_THRESHOLD) &
+                (actionable_df['confidence'] <= HIGH_CONFIDENCE_THRESHOLD)]),
             'buy_signals': len(actionable_df[actionable_df['predicted_signal'].str.contains('Buy|Up', na=False)]),
             'sell_signals': len(actionable_df[actionable_df['predicted_signal'].str.contains('Sell|Down', na=False)]),
             'avg_confidence': actionable_df['confidence'].mean() if not actionable_df.empty else None,
@@ -497,7 +554,15 @@ def main():
     parser.add_argument('--create-tables', action='store_true', help='Create database tables (first time setup)')
     parser.add_argument('--ticker', type=str, help='Stock ticker symbol')
     parser.add_argument('--batch', action='store_true', help='Export all predictions')
-    parser.add_argument('--confidence', type=float, default=0.5, help='Minimum confidence threshold')
+    # --confidence used to mean two different things: the high_confidence gate on
+    # export and a minimum-confidence filter on --query. Split into two flags so the
+    # export gate can never be silently lowered again (it was 0.5, hence the flag
+    # firing on 76% of all rows historically).
+    parser.add_argument('--confidence', type=float, default=0.5,
+                        help='Minimum confidence filter for --query only (default: 0.5)')
+    parser.add_argument('--high-conf-threshold', type=float, default=HIGH_CONFIDENCE_THRESHOLD,
+                        help=f'Gate for the high_confidence flag on export '
+                             f'(default: {HIGH_CONFIDENCE_THRESHOLD} from nasdaq_config)')
     parser.add_argument('--query', action='store_true', help='Query existing predictions')
     parser.add_argument('--summary', action='store_true', help='Show latest run summary')
     parser.add_argument('--start-date', type=str, help='Start date for query (YYYY-MM-DD)')
@@ -534,7 +599,7 @@ def main():
         # Default: Export to database
         success = exporter.export_predictions_to_db(
             ticker=args.ticker,
-            confidence_threshold=args.confidence,
+            confidence_threshold=args.high_conf_threshold,
             skip_on_holiday=not args.ignore_holiday
         )
         

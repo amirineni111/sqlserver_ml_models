@@ -1,0 +1,172 @@
+{
+  "date": "2026-08-07T18:56:22.944930",
+  "log_file": "logs\\daily_automation_20260807_184501.log",
+  "data_status": {
+    "connected": true,
+    "age_days": 0,
+    "latest_date": "2026-08-07",
+    "total_records": 2445909
+  },
+  "retraining": {
+    "performed": false,
+    "success": null,
+    "duration_minutes": null,
+    "reason": "Skipping retrain (data age: 0 days). Use --force-retrain or weekly schedule."
+  },
+  "database_export": {
+    "success": true,
+    "records_inserted": 2216
+  },
+  "live_accuracy": {
+    "rolling_20d": {
+      "window_trading_days": 20,
+      "n_predictions": 32403,
+      "n_suppressed": 10856,
+      "suppressed_accuracy": 0.5221,
+      "accuracy": 0.5215,
+      "buy_accuracy": 0.565,
+      "buy_n": 14671,
+      "sell_accuracy": 0.4856,
+      "sell_n": 17732,
+      "by_confidence": {
+        "<55%": {
+          "n": 14055,
+          "accuracy": 0.4685
+        },
+        "55-60%": {
+          "n": 12670,
+          "accuracy": 0.5708
+        },
+        "60-67%": {
+          "n": 5483,
+          "accuracy": 0.5442
+        },
+        ">=67%": {
+          "n": 195,
+          "accuracy": 0.5026
+        }
+      },
+      "by_sector": {
+        "Basic Materials": {
+          "n": 1975,
+          "accuracy": 0.5048
+        },
+        "Communication Services": {
+          "n": 1547,
+          "accuracy": 0.5837
+        },
+        "Consumer Cyclical": {
+          "n": 3723,
+          "accuracy": 0.5702
+        },
+        "Consumer Defensive": {
+          "n": 1503,
+          "accuracy": 0.5689
+        },
+        "Financial Services": {
+          "n": 6846,
+          "accuracy": 0.4503
+        },
+        "Healthcare": {
+          "n": 4156,
+          "accuracy": 0.5137
+        },
+        "Industrials": {
+          "n": 4520,
+          "accuracy": 0.5212
+        },
+        "Real Estate": {
+          "n": 2158,
+          "accuracy": 0.5051
+        },
+        "Technology": {
+          "n": 4664,
+          "accuracy": 0.5598
+        },
+        "Utilities": {
+          "n": 1261,
+          "accuracy": 0.5678
+        }
+      },
+      "first_date": "2026-07-06",
+      "last_date": "2026-07-31"
+    },
+    "rolling_60d": {
+      "window_trading_days": 60,
+      "n_predictions": 83635,
+      "n_suppressed": 32970,
+      "suppressed_accuracy": 0.5233,
+      "accuracy": 0.5293,
+      "buy_accuracy": 0.5558,
+      "buy_n": 34689,
+      "sell_accuracy": 0.5104,
+      "sell_n": 48946,
+      "by_confidence": {
+        "<55%": {
+          "n": 35822,
+          "accuracy": 0.4963
+        },
+        "55-60%": {
+          "n": 27808,
+          "accuracy": 0.5449
+        },
+        "60-67%": {
+          "n": 16013,
+          "accuracy": 0.5602
+        },
+        ">=67%": {
+          "n": 3992,
+          "accuracy": 0.5919
+        }
+      },
+      "by_sector": {
+        "Basic Materials": {
+          "n": 5006,
+          "accuracy": 0.4992
+        },
+        "Communication Services": {
+          "n": 4065,
+          "accuracy": 0.5378
+        },
+        "Consumer Cyclical": {
+          "n": 9306,
+          "accuracy": 0.5465
+        },
+        "Consumer Defensive": {
+          "n": 3816,
+          "accuracy": 0.5417
+        },
+        "Energy": {
+          "n": 1729,
+          "accuracy": 0.4413
+        },
+        "Financial Services": {
+          "n": 16085,
+          "accuracy": 0.4959
+        },
+        "Healthcare": {
+          "n": 11348,
+          "accuracy": 0.5211
+        },
+        "Industrials": {
+          "n": 11568,
+          "accuracy": 0.5405
+        },
+        "Real Estate": {
+          "n": 5248,
+          "accuracy": 0.5494
+        },
+        "Technology": {
+          "n": 12311,
+          "accuracy": 0.548
+        },
+        "Utilities": {
+          "n": 2994,
+          "accuracy": 0.6032
+        }
+      },
+      "first_date": "2026-05-06",
+      "last_date": "2026-07-31"
+    }
+  }
+}

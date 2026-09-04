@@ -59,6 +59,48 @@ RSI_OVERBOUGHT_BUY_BLOCK = float(os.getenv('RSI_OVERBOUGHT_BUY_BLOCK', '70'))
 # Commodity/geopolitical drivers not in feature set. Set to False to re-enable.
 ENERGY_SECTOR_EXCLUDED = os.getenv('ENERGY_SECTOR_EXCLUDED', 'true').lower() == 'true'
 
+# Direction of the energy exclusion. The blanket rule was derived from COMBINED
+# accuracy, but energy is strongly directional over the last 150d of outcomes:
+#   energy Buy  suppressed rows: 67.1% win (n=1,514)  <- best bucket in the system
+#   energy Sell suppressed rows: 40.3% win (n=3,524)  <- worst
+# So the blanket rule throws away the good half. 'both' preserves the historical
+# behaviour and stays the default because switching to 'sell' ENABLES new trades
+# (a risk-increasing change, and a 150-day energy uptrend may not persist).
+# Set ENERGY_EXCLUSION_SIDE=sell to act on the evidence.
+ENERGY_EXCLUSION_SIDE = os.getenv('ENERGY_EXCLUSION_SIDE', 'both').lower()
+
+# Industry-level reliability filters (Sep 2026). `sector` is too coarse to express
+# these: 'Basic Materials' contains both the best and the worst industry buckets.
+# Format matches SECTOR_CONFIDENCE_OVERRIDES: {industry: {side: min_confidence}}.
+# Each entry below is backed by 150 days of ml_prediction_outcomes:
+#   Other Industrial Metals & Mining  Buy  39.1% actionable win (n=302)   -> gate hard
+#   Marine Shipping                   Sell 33.3% actionable win (n=168)   -> gate hard
+# Deliberately NOT gated, despite being requested in review — the data says they
+# are working and blocking them would remove good signal:
+#   Gold/Silver/Precious Metals       Buy  59.2% actionable win (n=1,131) vs 52.9% baseline
+#   Marine Shipping                   Buy  81.4% actionable win (n=70)
+#   Biotechnology                     Buy  53.8% / Sell 49.2% — within noise of baseline
+# 0.99 = effectively always suppress; a value inside the model's range gates instead.
+_industry_overrides_env = os.getenv('INDUSTRY_CONFIDENCE_OVERRIDES', '')
+if _industry_overrides_env:
+    import json as _json_ind
+    INDUSTRY_CONFIDENCE_OVERRIDES: dict = _json_ind.loads(_industry_overrides_env)
+else:
+    INDUSTRY_CONFIDENCE_OVERRIDES: dict = {
+        'Other Industrial Metals & Mining': {'Up': 0.99},
+        'Marine Shipping': {'Down': 0.99},
+    }
+
+# Minimum confidence for a Sell to be actionable. There has never been a Sell floor
+# (only SELL_MAX_CONFIDENCE, a cap), which is the real source of the Buy/Sell
+# suppression asymmetry: 82% of Buys are gated vs 11% of Sells. Left DISABLED (0.0)
+# because a floor only helps if confidence is informative, and on the Sell side it
+# is not — realized win rate is flat across every bucket (49.8/51.6/50.5/51.4/51.5)
+# and the Brier skill score is negative (-0.0154). Gating a non-signal just cuts
+# volume at random. The Sell side needs model work, not a threshold. Knob exists so
+# the floor can be enabled the moment recalibration makes Sell confidence mean something.
+SELL_MIN_CONFIDENCE = float(os.getenv('SELL_MIN_CONFIDENCE', '0.0'))
+
 # Minimum stock price filter: exclude penny/micro-cap stocks from predictions and training.
 # Stocks below $5 have erratic volume, wide bid-ask spreads, and thin liquidity that makes
 # technical signals unreliable. Applied at SQL layer (training + prediction) and Python layer.

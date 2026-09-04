@@ -26,7 +26,8 @@ from nasdaq_config import (
     HIGH_CONFIDENCE_THRESHOLD, MEDIUM_CONFIDENCE_THRESHOLD,
     BUY_MIN_CONFIDENCE, SELL_MAX_CONFIDENCE,
     RSI_OVERBOUGHT_BUY_BLOCK, ENERGY_SECTOR_EXCLUDED,
-    MIN_STOCK_PRICE, SECTOR_CONFIDENCE_OVERRIDES
+    MIN_STOCK_PRICE, SECTOR_CONFIDENCE_OVERRIDES,
+    ENERGY_EXCLUSION_SIDE, INDUSTRY_CONFIDENCE_OVERRIDES, SELL_MIN_CONFIDENCE
 )
 
 warnings.filterwarnings('ignore')
@@ -229,7 +230,11 @@ class TradingSignalPredictor:
             print(f"[WARN] Could not load fundamentals: {e}")
         
         try:
-            sector_query = "SELECT ticker, sector FROM dbo.nasdaq_top100"
+            # industry is metadata only (never a model feature) — it drives the
+            # industry-level reliability filters, which sector is too coarse for:
+            # 'Basic Materials' mixes gold miners (59.2% actionable Buy win) with
+            # industrial metals miners (39.1%). Sep 2026.
+            sector_query = "SELECT ticker, sector, industry FROM dbo.nasdaq_top100"
             df_sector = self.db.execute_query(sector_query)
             if not df_sector.empty:
                 df = df.merge(df_sector, on='ticker', how='left')
@@ -1037,7 +1042,7 @@ class TradingSignalPredictor:
         # Make predictions
         probabilities = self.model.predict_proba(X_scaled)
         # Create results DataFrame
-        sector_cols = ['sector'] if 'sector' in latest_data.columns else []
+        sector_cols = [c for c in ('sector', 'industry') if c in latest_data.columns]
         results = latest_data[['trading_date', 'ticker', 'company', 'close_price', 'RSI'] + sector_cols].copy()
         # Decide direction by thresholding P(Up) instead of argmax@0.5. With the tuned
         # threshold this undoes the sigmoid base-rate collapse that labeled ~94% of tickers
@@ -1118,11 +1123,42 @@ class TradingSignalPredictor:
             (results['RSI'] > RSI_OVERBOUGHT_BUY_BLOCK)
         )
 
-        # Rule 4: Energy sector exclusion
+        # Rule 4: Energy sector exclusion (optionally one-sided — see
+        # ENERGY_EXCLUSION_SIDE; energy Buys realize 67.1% vs energy Sells 40.3%)
         if ENERGY_SECTOR_EXCLUDED and 'sector' in results.columns:
-            rule_masks['energy_sector'] = results['sector'] == 'Energy'
+            energy = results['sector'] == 'Energy'
+            if ENERGY_EXCLUSION_SIDE == 'sell':
+                energy &= results['predicted_signal'] == 'Down'
+            elif ENERGY_EXCLUSION_SIDE == 'buy':
+                energy &= results['predicted_signal'] == 'Up'
+            rule_masks['energy_sector'] = energy
         else:
             rule_masks['energy_sector'] = pd.Series(False, index=results.index)
+
+        # Rule 4b: Sell confidence floor (disabled by default — see SELL_MIN_CONFIDENCE)
+        if SELL_MIN_CONFIDENCE > 0:
+            rule_masks['sell_low_conf'] = (
+                (results['predicted_signal'] == 'Down') &
+                (results['confidence'] < SELL_MIN_CONFIDENCE)
+            )
+        else:
+            rule_masks['sell_low_conf'] = pd.Series(False, index=results.index)
+
+        # Rule 4c: Industry-level overrides. Finer than sector: 'Basic Materials'
+        # holds both gold miners (59.2% actionable Buy win — kept) and industrial
+        # metals miners (39.1% — gated). Reason is reported as industry_override.
+        industry_mask = pd.Series(False, index=results.index)
+        if INDUSTRY_CONFIDENCE_OVERRIDES and 'industry' in results.columns:
+            for industry_name, sides in INDUSTRY_CONFIDENCE_OVERRIDES.items():
+                # Accept both {industry: threshold} and {industry: {side: threshold}}
+                side_map = sides if isinstance(sides, dict) else {'Up': sides, 'Down': sides}
+                for side, min_conf in side_map.items():
+                    industry_mask |= (
+                        (results['industry'] == industry_name) &
+                        (results['predicted_signal'] == side) &
+                        (results['confidence'] < float(min_conf))
+                    )
+        rule_masks['industry_override'] = industry_mask
 
         # Rule 5: Sector-specific confidence overrides for near-random sectors.
         # Tech (49.9% acc) and Healthcare (49.4% acc) require higher confidence threshold.
@@ -1150,16 +1186,14 @@ class TradingSignalPredictor:
 
         total_suppressed = int((~results['is_actionable']).sum())
         if total_suppressed > 0:
-            counts = {reason: int(mask.sum()) for reason, mask in rule_masks.items()}
+            # Report the assigned reason (first rule wins), not raw mask hits, so the
+            # counts reconcile with suppression_reason in the table. Iterating keeps
+            # this honest when rules are added.
+            assigned = results['suppression_reason'].value_counts().to_dict()
+            detail = ", ".join(f"{reason}={assigned.get(reason, 0)}" for reason in rule_masks)
             safe_print(
                 f"[FILTER] Reliability filters suppressed {total_suppressed}/{len(results)} signals "
-                f"(kept in output, flagged is_actionable=0): "
-                f"penny_stock={counts['penny_stock']}, "
-                f"buy_dead_zone={counts['buy_dead_zone']}, "
-                f"sell_high_conf={counts['sell_high_conf']}, "
-                f"rsi_overbought_buy={counts['rsi_overbought_buy']}, "
-                f"energy_sector={counts['energy_sector']}, "
-                f"sector_override={counts['sector_override']}"
+                f"(kept in output, flagged is_actionable=0): {detail}"
             )
 
         return results

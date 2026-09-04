@@ -34,6 +34,8 @@ from sqlalchemy import text
 sys.path.append(os.path.join(os.getcwd(), 'src'))
 from database.connection import SQLServerConnection
 
+from model_version import load_model_version  # noqa: E402
+
 OUTCOMES_TABLE = 'ml_prediction_outcomes'
 
 CREATE_TABLE_SQL = f"""
@@ -73,6 +75,8 @@ IF COL_LENGTH('ml_trading_predictions', 'is_actionable') IS NULL
     ALTER TABLE ml_trading_predictions ADD is_actionable BIT;
 IF COL_LENGTH('ml_trading_predictions', 'suppression_reason') IS NULL
     ALTER TABLE ml_trading_predictions ADD suppression_reason VARCHAR(100);
+IF COL_LENGTH('ml_trading_predictions', 'model_version') IS NULL
+    ALTER TABLE ml_trading_predictions ADD model_version VARCHAR(50);
 """
 
 # LEAD(close, 5) over actual history rows gives the close exactly 5 TRADING
@@ -91,7 +95,7 @@ WITH px AS (
 )
 SELECT p.prediction_id, p.run_timestamp, p.ticker, p.trading_date,
        p.predicted_signal, p.confidence,
-       p.is_actionable, p.suppression_reason,
+       p.is_actionable, p.suppression_reason, p.model_version,
        px.entry_close, px.realized_close_5d, px.realized_date
 FROM dbo.ml_trading_predictions p
 INNER JOIN px
@@ -115,15 +119,12 @@ def classify_signal(signal):
 
 
 def _load_model_version():
-    """Best-effort (timestamp, git_commit) of the current model artifacts."""
-    try:
-        with open(os.path.join('data', 'training_metadata.pkl'), 'rb') as f:
-            meta = pickle.load(f)
-        ts = meta.get('training_timestamp')
-        commit = meta.get('git_commit')
-        return ts, (f"{ts}@{commit}" if commit else ts)
-    except Exception:
-        return None, None
+    """Best-effort (timestamp, version) of the CURRENT model artifacts.
+
+    Only a fallback now: predictions written since Sep 2026 carry their own
+    model_version, which is authoritative. See model_version.py.
+    """
+    return load_model_version()
 
 
 def ensure_outcomes_table(db):
@@ -158,17 +159,21 @@ def evaluate_new_predictions(db=None, days_back=120):
         df['realized_return_5d'] <= 0,
     ).astype(int)
 
-    # Attribute the current model version only to predictions made after the
-    # current model was trained; older predictions came from an earlier model.
-    train_ts, version = _load_model_version()
-    df['model_version'] = None
-    if train_ts and version:
-        try:
-            trained_at = pd.to_datetime(train_ts, format='%Y%m%d_%H%M%S')
-            df.loc[pd.to_datetime(df['run_timestamp']) >= trained_at,
-                   'model_version'] = version
-        except Exception:
-            pass
+    # Prefer the version stamped on the prediction row at write time (exact).
+    # Fall back to the run_timestamp heuristic only for rows written before
+    # prediction-time stamping existed (Sep 2026) — those carry NULL.
+    if 'model_version' not in df.columns:
+        df['model_version'] = None
+    unstamped = df['model_version'].isna()
+    if unstamped.any():
+        train_ts, version = _load_model_version()
+        if train_ts and version:
+            try:
+                trained_at = pd.to_datetime(train_ts, format='%Y%m%d_%H%M%S')
+                df.loc[unstamped & (pd.to_datetime(df['run_timestamp']) >= trained_at),
+                       'model_version'] = version
+            except Exception:
+                pass
 
     # Rows written before the suppression flag existed had survived the old
     # drop-style filters, so NULL means actionable.
