@@ -55,7 +55,7 @@ def build_models(compare_gb=False):
 
 
 def evaluate_fold(model_factory, X, y, y_return, dates, train_dates, cal_dates,
-                  test_dates, dead_zone_pct):
+                  test_dates, dead_zone_pct, y_excess=None):
     """Train + calibrate on one fold, return test metrics."""
     date_vals = dates.values
     train_mask = np.isin(date_vals, train_dates)
@@ -70,6 +70,7 @@ def evaluate_fold(model_factory, X, y, y_return, dates, train_dates, cal_dates,
     X_train, X_cal, X_test = X[train_mask], X[cal_mask], X[test_mask]
     y_train, y_cal, y_test = y[train_mask], y[cal_mask], y[test_mask]
     test_dead_zone = dead_zone[test_mask]
+    excess_test = None if y_excess is None else np.asarray(y_excess)[test_mask]
 
     if len(X_train) < 500 or len(X_test) == 0 or len(np.unique(y_train)) < 2:
         return None
@@ -133,6 +134,15 @@ def evaluate_fold(model_factory, X, y, y_return, dates, train_dates, cal_dates,
                 'accuracy': round(float(accuracy_score(y_test[band], preds[band])), 4),
             }
 
+    # Mode-independent skill yardstick: did the call land on the right side of
+    # the same-day universe average? Lets absolute vs excess targets be compared.
+    beat = None
+    if excess_test is not None:
+        beat = np.where(preds == 1, excess_test > 0, excess_test < 0)
+        metrics['beat_universe'] = round(float(beat.mean()), 4)
+        top = conf >= np.quantile(conf, 0.9)
+        metrics['beat_universe_top_decile_conf'] = round(float(beat[top].mean()), 4)
+
     # 'Down' encodes to 0, 'Up' to 1 (LabelEncoder, alphabetical)
     for cls, label in [(1, 'buy'), (0, 'sell')]:
         side = preds == cls
@@ -141,6 +151,8 @@ def evaluate_fold(model_factory, X, y, y_return, dates, train_dates, cal_dates,
                 'n': int(side.sum()),
                 'accuracy': round(float(accuracy_score(y_test[side], preds[side])), 4),
             }
+            if beat is not None:
+                metrics['by_side'][label]['beat_universe'] = round(float(beat[side].mean()), 4)
 
     return metrics
 
@@ -153,6 +165,8 @@ def main():
     parser.add_argument('--days-back', type=int, default=730, help='Training data window')
     parser.add_argument('--dead-zone', type=float, default=None,
                         help='Label dead-zone %% override (default: nasdaq_config.LABEL_DEAD_ZONE_PCT)')
+    parser.add_argument('--target-mode', choices=['absolute', 'excess'], default=None,
+                        help='Label definition (default: nasdaq_config.TARGET_MODE)')
     parser.add_argument('--compare-gb', action='store_true',
                         help='Also evaluate the legacy GradientBoostingClassifier')
     args = parser.parse_args()
@@ -167,9 +181,10 @@ def main():
 
     retrainer = UltraFastWeeklyRetrainer(backup_old=False, days_back=args.days_back)
     df = retrainer.load_training_data()
-    df = retrainer.create_target_variable(df)
+    df = retrainer.create_target_variable(df, target_mode=args.target_mode)
     df_features = retrainer.engineer_features_vectorized(df)
     X, y, y_return, encoder, feature_cols, dates = retrainer.prepare_ml_dataset(df_features)
+    y_excess = retrainer.last_excess_return
 
     unique_dates = np.sort(pd.unique(dates.values))
     n_dates = len(unique_dates)
@@ -206,14 +221,16 @@ def main():
 
         for name, factory in models.items():
             m = evaluate_fold(factory, X, y, y_return, dates,
-                              train_dates, cal_dates, test_dates, dead_zone_pct)
+                              train_dates, cal_dates, test_dates, dead_zone_pct,
+                              y_excess=y_excess)
             if m is None:
                 print(f"  {name}: skipped (insufficient data)")
                 continue
             results[name].append(m)
             print(f"  {name}: acc={m['accuracy']:.3f} "
                   f"(ex-dead-zone={m['accuracy_ex_dead_zone']}) "
-                  f"f1={m['f1_weighted']:.3f} n={m['n_test']:,}")
+                  f"f1={m['f1_weighted']:.3f} beat_universe={m.get('beat_universe')} "
+                  f"(top-decile conf {m.get('beat_universe_top_decile_conf')}) n={m['n_test']:,}")
             for label, b in m['by_confidence'].items():
                 print(f"    conf {label}: {b['accuracy']:.3f} ({b['n']:,})")
 
@@ -221,17 +238,21 @@ def main():
     print("\n" + "=" * 70)
     print("[WALK-FORWARD SUMMARY]")
     summary = {'run_at': datetime.now().isoformat(), 'dead_zone_pct': dead_zone_pct,
+               'target_mode': retrainer.target_mode,
                'folds': args.folds, 'test_window': args.test_window, 'models': {}}
     for name, fold_metrics in results.items():
         if not fold_metrics:
             continue
         accs = [m['accuracy'] for m in fold_metrics]
+        beats = [m['beat_universe'] for m in fold_metrics if m.get('beat_universe') is not None]
         summary['models'][name] = {
             'mean_accuracy': round(float(np.mean(accs)), 4),
+            'mean_beat_universe': round(float(np.mean(beats)), 4) if beats else None,
             'std_accuracy': round(float(np.std(accs)), 4),
             'folds': fold_metrics,
         }
         print(f"  {name}: mean acc={np.mean(accs):.3f} (+/- {np.std(accs):.3f}) "
+              f"beat_universe={summary['models'][name]['mean_beat_universe']} "
               f"over {len(fold_metrics)} folds")
 
     out_dir = Path('data')

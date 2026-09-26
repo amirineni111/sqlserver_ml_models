@@ -36,7 +36,8 @@ import pandas as pd
 
 sys.path.append(os.path.join(os.getcwd(), 'src'))
 from database.connection import SQLServerConnection  # noqa: E402
-from evaluate_predictions import classify_signal, ensure_outcomes_table  # noqa: E402
+from evaluate_predictions import (  # noqa: E402
+    CLEAN_OUTCOMES_FILTER, classify_signal, ensure_outcomes_table)
 
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'derived_thresholds.json')
 
@@ -62,7 +63,7 @@ FALLBACK = {
 # the current calibration. Mixing the prior (isotonic) model's wider-spread outcomes is
 # exactly what would mis-derive the gates (the bug this layer prevents).
 OUTCOMES_SQL = """
-SELECT o.predicted_signal, o.confidence, o.correct, o.trading_date,
+SELECT o.predicted_signal, o.confidence, o.correct, o.beat_universe, o.trading_date,
        o.is_actionable, t.sector
 FROM dbo.ml_prediction_outcomes o
 LEFT JOIN dbo.nasdaq_top100 t ON t.ticker = o.ticker
@@ -70,7 +71,7 @@ WHERE o.correct IS NOT NULL
   AND o.confidence IS NOT NULL
   AND o.trading_date >= DATEADD(day, -:window_days, CAST(GETDATE() AS DATE))
   AND o.trading_date >= :model_since
-"""
+""" + CLEAN_OUTCOMES_FILTER  # drop stale re-inserts (1.3% Buy acc) that skewed the gates
 
 
 def _current_model_date():
@@ -155,6 +156,13 @@ def derive(db=None, window_days=DEFAULT_WINDOW_DAYS, model_since=None):
         result['_warnings'] = warnings
         return result, warnings
 
+    # An excess-target model is right when it lands on the correct side of the
+    # universe, not when the stock merely rose — gate on the metric it optimizes.
+    from nasdaq_config import TARGET_MODE
+    if TARGET_MODE == 'excess':
+        df = df[df['beat_universe'].notna()].copy()
+        df['correct'] = df['beat_universe']
+        meta['outcome_metric'] = 'beat_universe'
     df['correct'] = df['correct'].astype(float)
     df['direction'] = df['predicted_signal'].map(classify_signal)
     buys = df[df['direction'] == 'bullish'].copy()

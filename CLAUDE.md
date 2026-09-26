@@ -102,7 +102,11 @@ Merged from shared `market_context_daily` table on `trading_date` via `_merge_ma
 | sell_probability | FLOAT | P(Sell) from model |
 | high_confidence | BIT | Flag for confidence ≥ 60% (lowered from 70% Apr 2026); always 0 for suppressed rows |
 | is_actionable | BIT | 1 = passed reliability filters (tradeable); 0 = suppressed (June 2026) |
-| suppression_reason | VARCHAR | Why a row was suppressed: penny_stock / buy_dead_zone / sell_high_conf / rsi_overbought_buy / energy_sector / sector_override; NULL if actionable |
+| suppression_reason | VARCHAR | Why a row was suppressed: penny_stock / buy_dead_zone / sell_high_conf / rsi_overbought_buy / energy_sector / sector_override / industry_override; historical cleanup: stale_data / duplicate_run; NULL if actionable |
+| days_to_earnings_est | INT | Estimated calendar days to next earnings report (inferred from weekly `total_revenue` changes in `nasdaq_100_fundamentals`, ~91-day cycle); NULL if unknown (Sep 2026) |
+| earnings_in_hold | BIT | 1 = likely earnings report inside the 5-day hold. Informational — size down, don't skip (earnings don't lower accuracy but widen tail losses) |
+
+**Note on Target (Sep 2026)**: With `TARGET_MODE=excess` (set in `.env`), 'Buy' means *expected to beat the equal-weight universe over 5 trading days*, not *expected to rise*. Judge it with `ml_prediction_outcomes.beat_universe` / `excess_return_5d`, not `correct`. Walk-forward: top-decile-confidence beat-universe ~67% vs ~60% for the old absolute target. Predictions are one row per (ticker, trading_date) — the export is an UPSERT and tickers with a stopped price feed are no longer predicted.
 
 **Note on Confidence Threshold**: High-confidence threshold was lowered from 70% to 60% in April 2026 after analysis showed that calibrated models naturally output conservative probabilities. The previous 70% threshold resulted in only 50% prediction accuracy (no better than random). The 60% threshold aligns with the model's calibration and unlocks actionable signals while maintaining quality.
 

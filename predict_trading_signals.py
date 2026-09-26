@@ -32,6 +32,11 @@ from nasdaq_config import (
 
 warnings.filterwarnings('ignore')
 
+# Typical gap between quarterly reports, measured from nasdaq_100_fundamentals
+# total_revenue changes (median 91 days, Jan-Sep 2026)
+EARNINGS_CYCLE_DAYS = 91
+
+
 def safe_print(text):
     """Print text with safe encoding handling for Windows console."""
     try:
@@ -207,6 +212,47 @@ class TradingSignalPredictor:
             safe_print(f"❌ Error fetching data: {e}")
             return None
     
+    def _add_earnings_proximity(self, results):
+        """Estimate each ticker's next earnings report from fundamentals history.
+
+        There is no earnings calendar in stockdata_db, but nasdaq_100_fundamentals is
+        snapshotted weekly and total_revenue (trailing 12m) changes only when a
+        company reports: 83% of gaps between changes fall in 77-105 days (median 91).
+        The snapshot showing a change is the Sunday AFTER the report, so the report
+        is dated ~3 days before it and the next one ~91 days after that.
+
+        Informational only — NOT a suppression rule. Backtest Feb-Sep 2026: earnings
+        inside the 5-day hold did not lower beat-universe rate (Buy 49.4% vs 47.6%)
+        but widened the worst-1% excess return from -17.5% to -24%. That is a sizing
+        problem, so downstream consumers should size down on earnings_in_hold=1.
+        """
+        results['days_to_earnings_est'] = np.nan
+        results['earnings_in_hold'] = None
+        try:
+            hist = self.db.execute_query("""
+                SELECT ticker, fetch_date, CAST(total_revenue AS FLOAT) AS rev
+                FROM dbo.nasdaq_100_fundamentals
+                WHERE total_revenue IS NOT NULL
+                ORDER BY ticker, fetch_date""")
+            if hist is None or hist.empty:
+                return results
+            hist['fetch_date'] = pd.to_datetime(hist['fetch_date'])
+            hist = hist.drop_duplicates(['ticker', 'fetch_date'], keep='last')
+            prev = hist.groupby('ticker')['rev'].shift()
+            changed = prev.notna() & ((hist['rev'] - prev).abs() / prev.abs().clip(lower=1) > 0.001)
+            last_seen = hist[changed].groupby('ticker')['fetch_date'].max()
+            est_next = last_seen - pd.Timedelta(days=3) + pd.Timedelta(days=EARNINGS_CYCLE_DAYS)
+            days_to = (results['ticker'].map(est_next) - pd.to_datetime(results['trading_date'])).dt.days
+            results['days_to_earnings_est'] = days_to
+            # 5-trading-day hold is ~7 calendar days; the weekly snapshot adds ~±3 days
+            in_hold = days_to.between(-3, 10)
+            results['earnings_in_hold'] = np.where(days_to.notna(), in_hold, None)
+            safe_print(f"[EARNINGS] Estimated next report for {int(days_to.notna().sum())} tickers; "
+                       f"{int(in_hold.sum())} have a likely report inside the 5-day hold")
+        except Exception as e:
+            print(f"[WARN] Could not estimate earnings proximity: {e}")
+        return results
+
     def _merge_fundamentals(self, df):
         """Load fundamentals & sector data separately and merge into main DataFrame"""
         try:
@@ -1035,6 +1081,21 @@ class TradingSignalPredictor:
         if latest_data.empty:
             safe_print("⚠️  No data available for prediction")
             return None
+        # Drop tickers whose feed stopped. tail(1) over the 80-day window returns a
+        # delisted/halted ticker's LAST row, so it was re-predicted every day with the
+        # same old trading_date (up to 49 times, stamped with each new model_version).
+        # Those ~3,700 rows scored 1.3% Buy accuracy in ml_prediction_outcomes and
+        # poisoned the feedback loop (Sep 2026). A prediction is only valid for the
+        # latest session in the universe.
+        if not date:
+            latest_session = latest_data['trading_date'].max()
+            stale = latest_data['trading_date'] < latest_session
+            if stale.any():
+                safe_print(f"[STALE] Skipping {int(stale.sum())} tickers with no data for "
+                           f"{latest_session.date()} (feed stopped): "
+                           f"{', '.join(latest_data.loc[stale, 'ticker'].head(10))}"
+                           f"{' ...' if stale.sum() > 10 else ''}")
+                latest_data = latest_data[~stale]
         # Prepare features
         X = latest_data[self.feature_columns].copy()
         # Scale features
@@ -1069,6 +1130,7 @@ class TradingSignalPredictor:
         results['high_confidence'] = results['confidence'] > confidence_threshold
         # Apply reliability filters to suppress systematically inaccurate signals
         results = self._apply_reliability_filters(results)
+        results = self._add_earnings_proximity(results)
         return results
 
     def _apply_reliability_filters(self, results: pd.DataFrame) -> pd.DataFrame:

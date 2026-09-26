@@ -168,9 +168,12 @@ def should_retrain(data_age_days, force_retrain=False):
 
     # Performance trigger: live accuracy degradation
     try:
-        from nasdaq_config import MIN_LIVE_ACCURACY, RETRAIN_COOLDOWN_DAYS
+        from nasdaq_config import MIN_LIVE_ACCURACY, RETRAIN_COOLDOWN_DAYS, TARGET_MODE
         from evaluate_predictions import get_rolling_accuracy
         stats = get_rolling_accuracy(n_days=20)
+        # An excess-target model is judged on beating the universe, not raw direction
+        if stats and TARGET_MODE == 'excess' and stats.get('beat_universe_rate') is not None:
+            stats['accuracy'] = stats['beat_universe_rate']
         if stats and stats['n_predictions'] >= 100 and stats['accuracy'] < MIN_LIVE_ACCURACY:
             since_retrain = days_since_last_retrain()
             if since_retrain is not None and since_retrain < RETRAIN_COOLDOWN_DAYS:
