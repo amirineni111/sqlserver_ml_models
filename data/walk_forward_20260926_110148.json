@@ -1,0 +1,176 @@
+{
+  "run_at": "2026-09-26T11:01:48.282884",
+  "dead_zone_pct": 1.0,
+  "target_mode": "absolute",
+  "folds": 4,
+  "test_window": 21,
+  "models": {
+    "Hist Gradient Boosting": {
+      "mean_accuracy": 0.5458,
+      "mean_beat_universe": 0.5188,
+      "std_accuracy": 0.0193,
+      "folds": [
+        {
+          "n_test": 45220,
+          "accuracy": 0.5434,
+          "accuracy_ex_dead_zone": 0.5523,
+          "f1_weighted": 0.5326,
+          "test_start": "2026-05-20",
+          "test_end": "2026-06-18",
+          "by_confidence": {
+            "<55%": {
+              "n": 30721,
+              "accuracy": 0.5226
+            },
+            "55-60%": {
+              "n": 12165,
+              "accuracy": 0.5734
+            },
+            "60-67%": {
+              "n": 2142,
+              "accuracy": 0.6489
+            },
+            ">=67%": {
+              "n": 192,
+              "accuracy": 0.7969
+            }
+          },
+          "by_side": {
+            "buy": {
+              "n": 15661,
+              "accuracy": 0.5941,
+              "beat_universe": 0.4993
+            },
+            "sell": {
+              "n": 29559,
+              "accuracy": 0.5165,
+              "beat_universe": 0.5218
+            }
+          },
+          "beat_universe": 0.514,
+          "beat_universe_top_decile_conf": 0.5834
+        },
+        {
+          "n_test": 44929,
+          "accuracy": 0.5574,
+          "accuracy_ex_dead_zone": 0.5723,
+          "f1_weighted": 0.5186,
+          "test_start": "2026-06-22",
+          "test_end": "2026-07-21",
+          "by_confidence": {
+            "<55%": {
+              "n": 16062,
+              "accuracy": 0.5161
+            },
+            "55-60%": {
+              "n": 13376,
+              "accuracy": 0.554
+            },
+            "60-67%": {
+              "n": 11598,
+              "accuracy": 0.5741
+            },
+            ">=67%": {
+              "n": 3893,
+              "accuracy": 0.6902
+            }
+          },
+          "by_side": {
+            "buy": {
+              "n": 35175,
+              "accuracy": 0.5609,
+              "beat_universe": 0.5411
+            },
+            "sell": {
+              "n": 9754,
+              "accuracy": 0.5448,
+              "beat_universe": 0.5848
+            }
+          },
+          "beat_universe": 0.5506,
+          "beat_universe_top_decile_conf": 0.6546
+        },
+        {
+          "n_test": 44547,
+          "accuracy": 0.5668,
+          "accuracy_ex_dead_zone": 0.5831,
+          "f1_weighted": 0.556,
+          "test_start": "2026-07-22",
+          "test_end": "2026-08-19",
+          "by_confidence": {
+            "<55%": {
+              "n": 18686,
+              "accuracy": 0.5257
+            },
+            "55-60%": {
+              "n": 14035,
+              "accuracy": 0.5554
+            },
+            "60-67%": {
+              "n": 8353,
+              "accuracy": 0.6173
+            },
+            ">=67%": {
+              "n": 3473,
+              "accuracy": 0.7124
+            }
+          },
+          "by_side": {
+            "buy": {
+              "n": 29407,
+              "accuracy": 0.5817,
+              "beat_universe": 0.4899
+            },
+            "sell": {
+              "n": 15140,
+              "accuracy": 0.5379,
+              "beat_universe": 0.6024
+            }
+          },
+          "beat_universe": 0.5281,
+          "beat_universe_top_decile_conf": 0.6615
+        },
+        {
+          "n_test": 44173,
+          "accuracy": 0.5156,
+          "accuracy_ex_dead_zone": 0.5193,
+          "f1_weighted": 0.5234,
+          "test_start": "2026-08-20",
+          "test_end": "2026-09-18",
+          "by_confidence": {
+            "<55%": {
+              "n": 14787,
+              "accuracy": 0.5125
+            },
+            "55-60%": {
+              "n": 12988,
+              "accuracy": 0.5196
+            },
+            "60-67%": {
+              "n": 10710,
+              "accuracy": 0.4909
+            },
+            ">=67%": {
+              "n": 5688,
+              "accuracy": 0.561
+            }
+          },
+          "by_side": {
+            "buy": {
+              "n": 19924,
+              "accuracy": 0.3684,
+              "beat_universe": 0.4682
+            },
+            "sell": {
+              "n": 24249,
+              "accuracy": 0.6365,
+              "beat_universe": 0.4945
+            }
+          },
+          "beat_universe": 0.4826,
+          "beat_universe_top_decile_conf": 0.5045
+        }
+      ]
+    }
+  }
+}
