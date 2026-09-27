@@ -1,7 +1,7 @@
 [
+  "sr_signal_strength",
   "sma_cross_signal",
   "sr_pivot_position",
-  "sr_signal_strength",
   "sma_trend_strength",
   "price_vs_52wk_high",
   "price_vs_200d_avg",
@@ -16,13 +16,13 @@
   "fundamental_quality_score",
   "beta_adjusted_alpha",
   "pe_vs_sector_median",
-  "rsi_vs_sector_avg",
-  "defensive_risk_score",
+  "volume_anomaly",
   "outperformance_in_fear",
+  "defensive_risk_score",
   "contrarian_strength",
   "sector_momentum_confirmed",
   "sector_etf_return_1d",
-  "dxy_return_1d",
+  "nasdaq_comp_return_1d",
   "sp500_return_1d",
-  "nasdaq_comp_return_1d"
+  "vix_change_pct"
 ]
