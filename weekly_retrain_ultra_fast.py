@@ -53,7 +53,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.utils.class_weight import compute_sample_weight
 from model_calibration import IsotonicCalibratedClassifier, SigmoidCalibratedClassifier, PreFittedEnsemble  # noqa: F401 — Isotonic kept for joblib backward compat
-from nasdaq_config import LABEL_DEAD_ZONE_PCT
+from nasdaq_config import LABEL_DEAD_ZONE_PCT, TARGET_MODE
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), 'src'))
@@ -99,6 +99,10 @@ class UltraFastWeeklyRetrainer:
         self.backup_old = backup_old
         self.days_back = days_back
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.target_mode = TARGET_MODE
+        # 5d excess-vs-universe return aligned with prepare_ml_dataset's output rows,
+        # so evaluators can score beat-the-universe regardless of target mode.
+        self.last_excess_return = None
 
         # Database connection
         self.db = SQLServerConnection()
@@ -581,9 +585,13 @@ class UltraFastWeeklyRetrainer:
     # TARGET VARIABLE
     # ================================================================
 
-    def create_target_variable(self, df):
+    def create_target_variable(self, df, target_mode=None):
         """
         Create target variable: 5-day price direction (Up/Down)
+
+        target_mode (default nasdaq_config.TARGET_MODE):
+          'absolute' — Up = 5-day return > 0
+          'excess'   — Up = 5-day return > same-day universe mean (cross-sectional)
 
         Using 5-day forward returns because:
         - 1-day direction is essentially random noise (~50%)
@@ -602,11 +610,21 @@ class UltraFastWeeklyRetrainer:
             (df_target['next_5d_close'] - df_target['close_price'])
             / df_target['close_price'] * 100
         )
-        df_target['direction_5d'] = np.where(df_target['next_5d_return'] > 0, 'Up', 'Down')
-
         # Remove rows without 5-day target (last 5 rows per ticker)
         valid_mask = df_target['next_5d_close'].notna()
         df_target = df_target[valid_mask]
+
+        # Equal-weight universe mean per date — same definition as the live
+        # beat_universe metric in evaluate_predictions.py
+        df_target['next_5d_excess'] = (
+            df_target['next_5d_return']
+            - df_target.groupby('trading_date')['next_5d_return'].transform('mean')
+        )
+        if target_mode:
+            self.target_mode = target_mode
+        label_source = 'next_5d_excess' if self.target_mode == 'excess' else 'next_5d_return'
+        print(f"  Target mode: {self.target_mode} (label from {label_source})")
+        df_target['direction_5d'] = np.where(df_target[label_source] > 0, 'Up', 'Down')
 
         # Report target distribution
         dist = df_target['direction_5d'].value_counts()
@@ -1240,6 +1258,7 @@ class UltraFastWeeklyRetrainer:
 
         # Exclude non-feature columns
         exclude_cols = ['trading_date', 'ticker', target_column, 'next_5d_return',
+                        'next_5d_excess',  # future information — never a feature
                         'open_price', 'high_price', 'low_price', 'close_price', 'volume']
 
         feature_cols = [col for col in df_features.columns
@@ -1248,7 +1267,10 @@ class UltraFastWeeklyRetrainer:
 
         X = df_features[feature_cols].copy()
         y_direction = df_features[target_column].copy()
-        y_return = df_features['next_5d_return'].copy()
+        # In excess mode the dead-zone and regression target follow the label
+        return_col = 'next_5d_excess' if self.target_mode == 'excess' else 'next_5d_return'
+        y_return = df_features[return_col].copy()
+        y_excess = df_features['next_5d_excess'].copy()
         dates = pd.to_datetime(df_features['trading_date']).copy()
 
         # Remove any remaining NaN rows
@@ -1256,6 +1278,7 @@ class UltraFastWeeklyRetrainer:
         X = X[valid_mask]
         y_direction = y_direction[valid_mask]
         y_return = y_return[valid_mask]
+        y_excess = y_excess[valid_mask]
         dates = dates[valid_mask]
 
         # Sort globally by trading date (stable sort keeps ticker order within
@@ -1266,6 +1289,7 @@ class UltraFastWeeklyRetrainer:
         X = X.iloc[order]
         y_direction = y_direction.iloc[order]
         y_return = y_return.iloc[order]
+        self.last_excess_return = y_excess.iloc[order]
         dates = dates.iloc[order]
 
         # Encode target
@@ -1727,6 +1751,7 @@ class UltraFastWeeklyRetrainer:
             'split_date_ranges': split_date_ranges,
             'dead_zone_pct': LABEL_DEAD_ZONE_PCT,
             'dead_zone_dropped': n_dz_dropped,
+            'target_mode': self.target_mode,
         }
 
     # ================================================================
@@ -1917,6 +1942,7 @@ class UltraFastWeeklyRetrainer:
         # Save training metadata
         metadata = {
             'training_timestamp': self.timestamp,
+            'target_mode': self.target_mode,
             'git_commit': git_commit,
             'feature_columns': self.feature_columns,
             'days_back': self.days_back,

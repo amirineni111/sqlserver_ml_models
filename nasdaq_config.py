@@ -143,6 +143,19 @@ MIN_LIVE_ACCURACY = float(os.getenv('MIN_LIVE_ACCURACY', '0.50'))
 # scores every stock). Set to 0 to disable.
 LABEL_DEAD_ZONE_PCT = float(os.getenv('LABEL_DEAD_ZONE_PCT', '1.0'))
 
+# Training target (Sep 2026).
+#   'absolute' — Up = 5-day return > 0 (historical behaviour).
+#   'excess'   — Up = 5-day return beats the same-day equal-weight universe average.
+# Outcome analysis Feb-Sep 2026 showed absolute-direction accuracy is ~87% explained
+# by how the whole universe moved (Spearman buy_acc vs universe %-up = 0.87), and
+# actionable Buys beat the universe only 47.9% of the time — the model was mostly
+# learning market beta. 'excess' asks the question the model can actually answer
+# (which names outperform), and is judged on ml_prediction_outcomes.beat_universe.
+# Default stays 'absolute' until walk_forward_eval.py --target-mode excess wins.
+TARGET_MODE = os.getenv('TARGET_MODE', 'absolute').lower()
+if TARGET_MODE not in ('absolute', 'excess'):
+    raise ValueError(f"TARGET_MODE must be 'absolute' or 'excess', got {TARGET_MODE!r}")
+
 # Cooldown (days) between performance-triggered retrains, to prevent retrain
 # churn when live accuracy oscillates around the threshold.
 RETRAIN_COOLDOWN_DAYS = int(os.getenv('RETRAIN_COOLDOWN_DAYS', '5'))

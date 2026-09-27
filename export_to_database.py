@@ -207,6 +207,10 @@ class DatabaseExporter:
             ALTER TABLE {self.predictions_table} ADD suppression_reason VARCHAR(100);
         IF COL_LENGTH('{self.predictions_table}', 'model_version') IS NULL
             ALTER TABLE {self.predictions_table} ADD model_version VARCHAR(50);
+        IF COL_LENGTH('{self.predictions_table}', 'days_to_earnings_est') IS NULL
+            ALTER TABLE {self.predictions_table} ADD days_to_earnings_est INT;
+        IF COL_LENGTH('{self.predictions_table}', 'earnings_in_hold') IS NULL
+            ALTER TABLE {self.predictions_table} ADD earnings_in_hold BIT;
         IF COL_LENGTH('{self.summary_table}', 'actionable_predictions') IS NULL
             ALTER TABLE {self.summary_table} ADD actionable_predictions INT;
         IF COL_LENGTH('{self.summary_table}', 'suppressed_predictions') IS NULL
@@ -277,19 +281,26 @@ class DatabaseExporter:
         # Export to database
         try:
             self._ensure_predictions_schema()
-            if 'is_actionable' in predictions_df.columns:
-                actionable_count = int(predictions_df['is_actionable'].astype(bool).sum())
-                print(f"[DATABASE] Inserting {len(predictions_df)} predictions "
-                      f"({actionable_count} actionable, {len(predictions_df) - actionable_count} suppressed)...")
-            else:
-                print(f"[DATABASE] Inserting {len(predictions_df)} predictions...")
-            predictions_df.to_sql(
-                self.predictions_table,
-                self.engine,
-                if_exists='append',
-                index=False,
-                chunksize=100
-            )
+            # Delete-then-insert in ONE transaction: a failed insert must not leave
+            # the day with its earlier predictions deleted and nothing in their place.
+            with self.engine.begin() as conn:
+                predictions_df = self._dedupe_against_existing(conn, predictions_df)
+                if predictions_df.empty:
+                    print("[SKIP] Every (ticker, trading_date) in this run is already stored and scored.")
+                    return True
+                if 'is_actionable' in predictions_df.columns:
+                    actionable_count = int(predictions_df['is_actionable'].astype(bool).sum())
+                    print(f"[DATABASE] Inserting {len(predictions_df)} predictions "
+                          f"({actionable_count} actionable, {len(predictions_df) - actionable_count} suppressed)...")
+                else:
+                    print(f"[DATABASE] Inserting {len(predictions_df)} predictions...")
+                predictions_df.to_sql(
+                    self.predictions_table,
+                    conn,
+                    if_exists='append',
+                    index=False,
+                    chunksize=100
+                )
             print(f"[SUCCESS] Predictions inserted into {self.predictions_table}")
             
             print(f"[DATABASE] Inserting {len(technical_df)} technical indicators...")
@@ -322,6 +333,50 @@ class DatabaseExporter:
             print(f"[ERROR] Database export failed: {e}")
             return False
     
+    def _dedupe_against_existing(self, conn, predictions_df, chunk_size=1000):
+        """Make the export an UPSERT on (ticker, trading_date).
+
+        The table has an identity PK only, so every re-run (manual retries,
+        catch-up runs) appended another copy of the same prediction and downstream
+        accuracy counted it twice. Now, inside the caller's transaction:
+          * existing rows NOT yet in ml_prediction_outcomes are replaced by this run
+            (latest model output wins while the prediction is still live);
+          * rows already scored are kept and this run's duplicate is dropped, so an
+            outcome is never orphaned or double-counted.
+        Chunked to stay under SQL Server's 2,100-parameter limit.
+        """
+        if predictions_df.empty:
+            return predictions_df
+        from sqlalchemy import bindparam
+        has_outcomes = conn.execute(text(
+            "SELECT OBJECT_ID('dbo.ml_prediction_outcomes')")).scalar() is not None
+        not_scored = ("AND NOT EXISTS (SELECT 1 FROM ml_prediction_outcomes o "
+                      "WHERE o.prediction_id = p.prediction_id)") if has_outcomes else ""
+        delete_sql = text(f"""
+            DELETE p FROM {self.predictions_table} p
+            WHERE p.trading_date = :d AND p.ticker IN :tickers {not_scored}
+        """).bindparams(bindparam('tickers', expanding=True))
+        remaining_sql = text(f"""
+            SELECT DISTINCT ticker FROM {self.predictions_table}
+            WHERE trading_date = :d AND ticker IN :tickers
+        """).bindparams(bindparam('tickers', expanding=True))
+
+        dates = pd.to_datetime(predictions_df['trading_date']).dt.date
+        scored, replaced = set(), 0
+        for d in sorted(dates.unique()):
+            tickers = predictions_df.loc[dates == d, 'ticker'].tolist()
+            for i in range(0, len(tickers), chunk_size):
+                chunk = tickers[i:i + chunk_size]
+                replaced += conn.execute(delete_sql, {'d': d, 'tickers': chunk}).rowcount or 0
+                scored.update((d, t) for (t,) in conn.execute(remaining_sql, {'d': d, 'tickers': chunk}))
+        if replaced:
+            print(f"[UPSERT] Replacing {replaced} unscored rows from an earlier run of the same trading_date")
+        if scored:
+            keep = [(d, t) not in scored for d, t in zip(dates, predictions_df['ticker'])]
+            print(f"[UPSERT] Skipping {len(keep) - sum(keep)} rows already scored in ml_prediction_outcomes")
+            predictions_df = predictions_df[keep]
+        return predictions_df
+
     def _prepare_predictions_data(self, results, run_timestamp):
         """Prepare predictions data for database"""
         df = results.copy()
@@ -382,7 +437,8 @@ class DatabaseExporter:
             'predicted_signal', 'confidence', 'confidence_percentage', 'signal_strength',
             'close_price', 'RSI', 'rsi_category', 'high_confidence',
             'sell_probability', 'buy_probability',
-            'is_actionable', 'suppression_reason', 'model_version'
+            'is_actionable', 'suppression_reason', 'model_version',
+            'days_to_earnings_est', 'earnings_in_hold'
         ]
         
         return df[[col for col in columns if col in df.columns]]
